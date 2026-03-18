@@ -28,7 +28,7 @@ impl ChannelRouter {
                 tracing::info!("Telegram channel configured");
                 channels.insert(
                     "telegram".into(),
-                    Arc::new(TelegramChannelAdapter(bot)),
+                    Arc::new(TelegramChannelAdapter(Arc::new(bot))),
                 );
             }
         }
@@ -142,7 +142,7 @@ impl ChannelRouter {
 }
 
 /// Adapter to wrap existing TelegramBot as a Channel.
-struct TelegramChannelAdapter(crate::telegram::TelegramBot);
+pub struct TelegramChannelAdapter(pub Arc<crate::telegram::TelegramBot>);
 
 impl Channel for TelegramChannelAdapter {
     fn name(&self) -> &str {
@@ -155,13 +155,14 @@ impl Channel for TelegramChannelAdapter {
 
     fn send<'a>(
         &'a self,
-        _target: &'a str,
-        _message: OutgoingMessage,
+        target: &'a str,
+        message: OutgoingMessage,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            // Telegram send is handled by the TelegramBot directly
-            // This adapter enables the router to track it
-            Ok(())
+            let chat_id: i64 = target
+                .parse()
+                .map_err(|_| crate::error::FerroError::Channel(format!("Invalid chat_id: {target}")))?;
+            self.0.send_long_message(chat_id, &message.text, None).await
         })
     }
 }

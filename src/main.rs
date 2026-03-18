@@ -197,7 +197,35 @@ fn handle_config(command: ConfigCommands) -> anyhow::Result<()> {
 }
 
 async fn handle_serve(config: Config) -> anyhow::Result<()> {
+    let (agent_loop, _audit) = build_agent(config.clone()).await?;
+    let agent_loop = Arc::new(Mutex::new(agent_loop));
+    let histories = Arc::new(Mutex::new(
+        std::collections::HashMap::<i64, Vec<Message>>::new(),
+    ));
+
+    // Start Telegram bot if configured
+    if let Some(ref tg_config) = config.telegram {
+        if let Some(bot) = ferroclaw::telegram::TelegramBot::from_config(tg_config) {
+            let bot = Arc::new(bot);
+            let agent = Arc::clone(&agent_loop);
+            let hist = Arc::clone(&histories);
+            tokio::spawn(async move {
+                if let Err(e) = bot.run(agent, hist).await {
+                    tracing::error!("Telegram bot stopped: {e}");
+                }
+            });
+            println!("Telegram bot started. Listening for messages...");
+        }
+    }
+
+    // Start gateway
     ferroclaw::gateway::start_gateway(&config).await?;
+
+    // Keep running (gateway is currently a stub, so just wait)
+    println!("Ferroclaw serving. Press Ctrl+C to stop.");
+    tokio::signal::ctrl_c().await?;
+    println!("\nShutting down.");
+
     Ok(())
 }
 
