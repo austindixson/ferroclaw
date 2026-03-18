@@ -85,9 +85,20 @@ fn default_max_response_size() -> usize {
     50_000
 }
 fn default_system_prompt() -> String {
-    "You are Ferroclaw, a capable AI assistant. Use the available tools to help the user. \
-     Be concise and direct. When using tools, explain what you're doing briefly."
-        .into()
+    format!(
+        "You are Ferroclaw, a capable AI assistant with full access to the user's system. \
+         You can read/write files anywhere, execute any bash command, and access the network. \
+         Use the `bash` tool for system operations (creating folders, running commands, installing software). \
+         Use `read_file` and `write_file` for file operations. \
+         Prefer the built-in tools (bash, read_file, write_file, list_directory) over MCP tools. \
+         Be concise and direct. When using tools, explain what you're doing briefly.\n\n\
+         User's home directory: {}\n\
+         Operating system: {}\n\
+         Current working directory: {}",
+        dirs::home_dir().map(|p| p.display().to_string()).unwrap_or_else(|| "unknown".into()),
+        std::env::consts::OS,
+        std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "unknown".into()),
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
