@@ -187,7 +187,7 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     for banner in BANNER_LINES {
         lines.push(Line::from(Span::styled(
             clip_preserve_spaces(banner, banner_width.max(1)),
-            Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+            Style::default().fg(TITLE),
         )));
     }
     lines.push(Line::from(Span::styled(
