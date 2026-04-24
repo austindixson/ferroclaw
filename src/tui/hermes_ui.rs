@@ -7,6 +7,14 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
+const BANNER_LINES: &[&str] = &[
+    "░▒▓███████▓▒░░▒▓████████▓▒░░▒▓███████▓▒░░▒▓██████▓▒░░▒▓███████▓▒░░▒▓███████▓▒░",
+    "░▒▓█▓▒░     ░▒▓█▓▒░      ░▒▓█▓▒░      ░▒▓█▓▒░▒▓█▓▒░▒▓█▓▒░      ░▒▓█▓▒░",
+    "░▒▓██████▓▒░░▒▓██████▓▒░ ░▒▓█▓▒░      ░▒▓████████▓▒░░▒▓█▓▒░      ░▒▓███████▓▒░",
+    "░▒▓█▓▒░     ░▒▓█▓▒░      ░▒▓█▓▒░      ░▒▓█▓▒░▒▓█▓▒░▒▓█▓▒░             ░▒▓█▓▒░",
+    "░▒▓█▓▒░     ░▒▓████████▓▒░░▒▓███████▓▒░▒▓█▓▒░▒▓█▓▒░░▒▓███████▓▒░░▒▓███████▓▒░",
+];
+
 const BORDER: Color = Color::Rgb(88, 106, 140);
 const TITLE: Color = Color::Rgb(186, 201, 224);
 const MUTED: Color = Color::Rgb(120, 138, 168);
@@ -32,20 +40,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(2), // Status bar (with top breathing room)
             Constraint::Length(input_height),
         ])
         .split(viewport);
 
-    draw_header(frame, chunks[0]);
-    draw_chat(frame, app, chunks[1]);
-    draw_status_bar(frame, app, chunks[2]);
-    draw_input(frame, app, chunks[3]);
+    draw_chat(frame, app, chunks[0]);
+    draw_status_bar(frame, app, chunks[1]);
+    draw_input(frame, app, chunks[2]);
 
     if app.slash_menu_visible {
-        draw_slash_menu_popup(frame, app, chunks[3]);
+        draw_slash_menu_popup(frame, app, chunks[2]);
     }
 }
 
@@ -165,14 +171,19 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner_width = area.width.saturating_sub(4) as usize;
     let mut lines: Vec<Line> = Vec::new();
 
-    // Keep top-of-chat minimal: only a short one-liner before first user content.
-    if app.chat_history.is_empty() {
-        lines.push(Line::from(Span::styled(
-            format!("Ferroclaw v{} · /help", env!("CARGO_PKG_VERSION")),
-            Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(""));
+    for banner in BANNER_LINES {
+        for seg in wrap_to_width(banner, inner_width.max(1)) {
+            lines.push(Line::from(Span::styled(
+                seg,
+                Style::default().fg(TITLE).add_modifier(Modifier::BOLD),
+            )));
+        }
     }
+    lines.push(Line::from(Span::styled(
+        format!("Ferroclaw v{} · /help · /model", env!("CARGO_PKG_VERSION")),
+        Style::default().fg(MUTED),
+    )));
+    lines.push(Line::from(""));
 
     for entry in &app.chat_history {
         match entry {
@@ -337,13 +348,22 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
+    // Bottom-anchor short transcripts so new chat appears near the composer.
+    let visible = area.height as usize;
+    if visible > 0 && lines.len() < visible {
+        let mut padded = Vec::with_capacity(visible);
+        padded.extend(std::iter::repeat_n(Line::from(""), visible - lines.len()));
+        padded.extend(lines);
+        lines = padded;
+    }
+
     app.total_chat_lines = lines.len() as u16;
     app.visible_chat_height = area.height;
 
     let total = lines.len() as u16;
-    let visible = app.visible_chat_height;
-    let scroll = if total > visible {
-        let max_offset = total - visible;
+    let visible_u16 = app.visible_chat_height;
+    let scroll = if total > visible_u16 {
+        let max_offset = total - visible_u16;
         let from_bottom = app.scroll_offset.min(max_offset);
         max_offset - from_bottom
     } else {

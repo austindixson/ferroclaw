@@ -15,7 +15,7 @@ use hermes_ui::draw as draw_hermes;
 
 use crate::agent::AgentLoop;
 use crate::agent::r#loop::AgentEvent;
-use crate::config::Config;
+use crate::config::{self, Config};
 use crate::tui::glitter_verbs::{
     elapsed_ms_since, glitter_verb_for_llm_pending, glitter_verb_for_tool_call,
 };
@@ -32,7 +32,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 struct ExternalSkill {
@@ -48,14 +49,20 @@ enum SlashAction {
     Send(String),
 }
 
-const BASE_SLASH_COMMANDS: [&str; 6] = [
+const BASE_SLASH_COMMANDS: [&str; 7] = [
     "/help",
+    "/model",
     "/skills",
     "/skills rescan",
     "/active-skills",
     "/use",
     "/unuse",
 ];
+
+#[derive(Default)]
+struct ModelCommandState {
+    openrouter_models: Vec<String>,
+}
 
 fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
@@ -95,6 +102,115 @@ fn normalize_pasted_payload(raw: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn fetch_openrouter_models(config: &Config) -> anyhow::Result<Vec<String>> {
+    let provider = config
+        .providers
+        .openrouter
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("providers.openrouter is not configured"))?;
+
+    let api_key = std::env::var(&provider.api_key_env)
+        .map_err(|_| anyhow::anyhow!("{} is not set", provider.api_key_env))?;
+
+    let base = provider.base_url.trim_end_matches('/');
+    let url = format!("{base}/models");
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()?;
+
+    let resp = client
+        .get(url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .send()?;
+
+    if !resp.status().is_success() {
+        return Err(anyhow::anyhow!("OpenRouter /models returned {}", resp.status()));
+    }
+
+    let json: serde_json::Value = resp.json()?;
+    let mut models: Vec<String> = json
+        .get("data")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|it| it.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    models.sort();
+    models.dedup();
+
+    if models.is_empty() {
+        return Err(anyhow::anyhow!("OpenRouter returned zero models"));
+    }
+
+    Ok(models)
+}
+
+fn persist_default_model(config: &Config, model: &str) -> anyhow::Result<PathBuf> {
+    let path = config::config_dir().join("config.toml");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut root = if path.exists() {
+        let content = std::fs::read_to_string(&path)?;
+        toml::from_str::<toml::Value>(&content).unwrap_or_else(|_| toml::Value::Table(Default::default()))
+    } else {
+        toml::Value::Table(Default::default())
+    };
+
+    let root_table = root
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("config root is not a table"))?;
+    let agent = root_table
+        .entry("agent")
+        .or_insert_with(|| toml::Value::Table(Default::default()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[agent] is not a table"))?;
+
+    agent.insert("default_model".into(), toml::Value::String(model.to_string()));
+    agent
+        .entry("max_iterations")
+        .or_insert_with(|| toml::Value::Integer(config.agent.max_iterations as i64));
+    agent
+        .entry("token_budget")
+        .or_insert_with(|| toml::Value::Integer(config.agent.token_budget as i64));
+    agent.entry("max_tool_calls_per_iteration").or_insert_with(|| {
+        toml::Value::Integer(config.agent.max_tool_calls_per_iteration as i64)
+    });
+    agent
+        .entry("max_tool_calls_total")
+        .or_insert_with(|| toml::Value::Integer(config.agent.max_tool_calls_total as i64));
+
+    std::fs::write(&path, toml::to_string_pretty(&root)?)?;
+    Ok(path)
+}
+
+fn try_restart_gateway() -> anyhow::Result<String> {
+    let exe = std::env::current_exe()?;
+    let exe_str = exe.display().to_string();
+    let log_path = config::data_dir().join("gateway.log");
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let script = format!(
+        "pkill -f '{} serve' >/dev/null 2>&1 || true; nohup '{}' serve >> '{}' 2>&1 &",
+        exe_str,
+        exe_str,
+        log_path.display()
+    );
+
+    let status = Command::new("sh").arg("-lc").arg(script).status()?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("gateway restart command exited with {}", status));
+    }
+    Ok(format!("Gateway restarted using {} serve", exe.display()))
 }
 
 fn discover_external_skills() -> SkillCatalog {
@@ -336,6 +452,9 @@ fn accept_selected_slash_menu_item(app: &mut App) -> bool {
 fn handle_slash_command(
     raw: &str,
     app: &mut App,
+    config: &Config,
+    model_state: &mut ModelCommandState,
+    pending_gateway_restart_confirm: &mut bool,
     catalog: &mut SkillCatalog,
     active_skills: &mut BTreeMap<String, ExternalSkill>,
 ) -> SlashAction {
@@ -346,8 +465,67 @@ fn handle_slash_command(
     match cmd {
         "/help" | "/?" => {
             app.chat_history.push(ChatEntry::SystemInfo(
-                "Slash commands: /skills, /skills rescan, /use <skill>, /unuse <skill|all>, /active-skills".into(),
+                "Slash commands: /model, /skills, /skills rescan, /use <skill>, /unuse <skill|all>, /active-skills".into(),
             ));
+            SlashAction::Continue
+        }
+        "/model" => {
+            let target = parts.collect::<Vec<_>>().join(" ").trim().to_string();
+            if target.is_empty() {
+                match fetch_openrouter_models(config) {
+                    Ok(models) => {
+                        model_state.openrouter_models = models;
+                        let total = model_state.openrouter_models.len();
+                        let mut s = format!(
+                            "OpenRouter models loaded: {}\nSelect with /model <number> or /model <provider/model-id>\n",
+                            total
+                        );
+                        for (idx, m) in model_state.openrouter_models.iter().take(40).enumerate() {
+                            s.push_str(&format!("{:>2}. {}\n", idx + 1, m));
+                        }
+                        if total > 40 {
+                            s.push_str(&format!("... and {} more\n", total - 40));
+                        }
+                        app.chat_history.push(ChatEntry::SystemInfo(s));
+                    }
+                    Err(e) => {
+                        app.chat_history.push(ChatEntry::Error(format!(
+                            "Failed to load OpenRouter models: {e}"
+                        )));
+                    }
+                }
+                return SlashAction::Continue;
+            }
+
+            let selected = if let Ok(n) = target.parse::<usize>() {
+                if n == 0 || n > model_state.openrouter_models.len() {
+                    app.chat_history.push(ChatEntry::Error(format!(
+                        "Model index out of range: {} (run /model to list)",
+                        n
+                    )));
+                    return SlashAction::Continue;
+                }
+                model_state.openrouter_models[n - 1].clone()
+            } else {
+                target
+            };
+
+            match persist_default_model(config, &selected) {
+                Ok(path) => {
+                    app.model_name = selected.clone();
+                    *pending_gateway_restart_confirm = true;
+                    app.chat_history.push(ChatEntry::SystemInfo(format!(
+                        "Model set to {} and saved to {}\nRestart gateway to apply live runtime change? (y/n)",
+                        selected,
+                        path.display()
+                    )));
+                }
+                Err(e) => {
+                    app.chat_history.push(ChatEntry::Error(format!(
+                        "Failed to persist model change: {e}"
+                    )));
+                }
+            }
             SlashAction::Continue
         }
         "/skills" => {
@@ -501,14 +679,20 @@ pub async fn run_hermes_tui(mut agent_loop: AgentLoop, config: &Config) -> anyho
 
 
     // Main loop
+    let mut model_state = ModelCommandState::default();
+    let mut pending_gateway_restart_confirm = false;
+
     let result = run_loop(
         &mut terminal,
         &mut app,
         &event_handler,
         &mut agent_loop,
+        config,
         &mut history,
         &mut skill_catalog,
         &mut active_skills,
+        &mut model_state,
+        &mut pending_gateway_restart_confirm,
     )
     .await;
 
@@ -529,9 +713,12 @@ async fn run_loop(
     app: &mut App,
     event_handler: &EventHandler,
     agent_loop: &mut AgentLoop,
+    config: &Config,
     history: &mut Vec<Message>,
     skill_catalog: &mut SkillCatalog,
     active_skills: &mut BTreeMap<String, ExternalSkill>,
+    model_state: &mut ModelCommandState,
+    pending_gateway_restart_confirm: &mut bool,
 ) -> anyhow::Result<()> {
     loop {
         refresh_slash_menu(app, skill_catalog, active_skills);
@@ -639,10 +826,42 @@ async fn run_loop(
                         continue;
                     }
 
+                    if *pending_gateway_restart_confirm {
+                        let answer = input.trim().to_ascii_lowercase();
+                        app.chat_history.push(ChatEntry::UserMessage(input.clone()));
+                        match answer.as_str() {
+                            "y" | "yes" => match try_restart_gateway() {
+                                Ok(msg) => app.chat_history.push(ChatEntry::SystemInfo(msg)),
+                                Err(e) => app.chat_history.push(ChatEntry::Error(format!(
+                                    "Failed to restart gateway: {e}"
+                                ))),
+                            },
+                            "n" | "no" => app.chat_history.push(ChatEntry::SystemInfo(
+                                "Gateway restart skipped. Run `/Users/ghost/.local/bin/ferroclaw serve` in another terminal when ready.".into(),
+                            )),
+                            _ => app.chat_history.push(ChatEntry::SystemInfo(
+                                "Please answer y or n for gateway restart.".into(),
+                            )),
+                        }
+                        if matches!(answer.as_str(), "y" | "yes" | "n" | "no") {
+                            *pending_gateway_restart_confirm = false;
+                        }
+                        app.scroll_to_bottom();
+                        continue;
+                    }
+
                     app.chat_history.push(ChatEntry::UserMessage(input.clone()));
                     app.scroll_to_bottom();
 
-                    match handle_slash_command(&input, app, skill_catalog, active_skills) {
+                    match handle_slash_command(
+                        &input,
+                        app,
+                        config,
+                        model_state,
+                        pending_gateway_restart_confirm,
+                        skill_catalog,
+                        active_skills,
+                    ) {
                         SlashAction::Continue => {
                             app.set_status("Ready");
                             app.scroll_to_bottom();
