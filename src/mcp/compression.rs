@@ -241,7 +241,8 @@ fn apply_compression(schema: &Value, config: &CompressionConfig) -> Value {
                 let compressed_value = apply_compression(value, config);
 
                 // Special handling for oneOf/anyOf
-                if (key == "oneOf" || key == "anyOf") && config.collapse_oneof
+                if (key == "oneOf" || key == "anyOf")
+                    && config.collapse_oneof
                     && let Some(arr) = compressed_value.as_array()
                     && let Some(collapsed) = collapse_oneof(arr)
                 {
@@ -250,7 +251,8 @@ fn apply_compression(schema: &Value, config: &CompressionConfig) -> Value {
                 }
 
                 // Special handling for properties (flatten nested objects)
-                if key == "properties" && config.flatten_nested
+                if key == "properties"
+                    && config.flatten_nested
                     && let Some(obj) = compressed_value.as_object()
                 {
                     let flattened = flatten_properties(obj, config);

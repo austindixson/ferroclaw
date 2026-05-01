@@ -21,13 +21,29 @@ fn test_task_store_and_plan_mode_integration() {
 
     // Create tasks with proper API
     let task1 = task_store
-        .create(TaskCreate { subject: "Design component".to_string(), description: "Design the main component architecture".to_string(), active_form: None, owner: None, blocks: vec![], blocked_by: vec![], metadata: std::collections::HashMap::new() })
+        .create(TaskCreate {
+            subject: "Design component".to_string(),
+            description: "Design the main component architecture".to_string(),
+            active_form: None,
+            owner: None,
+            blocks: vec![],
+            blocked_by: vec![],
+            metadata: std::collections::HashMap::new(),
+        })
         .unwrap();
 
     let task1_id = task1.id.clone();
 
     let task2 = task_store
-        .create(TaskCreate { subject: "Implement component".to_string(), description: "Implement the main component".to_string(), active_form: None, owner: None, blocks: vec![], blocked_by: vec![task1_id], metadata: std::collections::HashMap::new() })
+        .create(TaskCreate {
+            subject: "Implement component".to_string(),
+            description: "Implement the main component".to_string(),
+            active_form: None,
+            owner: None,
+            blocks: vec![],
+            blocked_by: vec![task1_id],
+            metadata: std::collections::HashMap::new(),
+        })
         .unwrap();
 
     // Simulate plan progression
@@ -62,15 +78,39 @@ fn test_task_dependency_workflow() {
 
     // Create task chain: A -> B -> C
     let task_a = task_store
-        .create(TaskCreate { subject: "Task A".to_string(), description: "First task".to_string(), active_form: None, owner: None, blocks: vec![], blocked_by: vec![], metadata: std::collections::HashMap::new() })
+        .create(TaskCreate {
+            subject: "Task A".to_string(),
+            description: "First task".to_string(),
+            active_form: None,
+            owner: None,
+            blocks: vec![],
+            blocked_by: vec![],
+            metadata: std::collections::HashMap::new(),
+        })
         .unwrap();
 
     let task_b = task_store
-        .create(TaskCreate { subject: "Task B".to_string(), description: "Second task depends on A".to_string(), active_form: None, owner: None, blocks: vec![], blocked_by: vec![task_a.id.clone()], metadata: std::collections::HashMap::new() })
+        .create(TaskCreate {
+            subject: "Task B".to_string(),
+            description: "Second task depends on A".to_string(),
+            active_form: None,
+            owner: None,
+            blocks: vec![],
+            blocked_by: vec![task_a.id.clone()],
+            metadata: std::collections::HashMap::new(),
+        })
         .unwrap();
 
     let task_c = task_store
-        .create(TaskCreate { subject: "Task C".to_string(), description: "Third task depends on B".to_string(), active_form: None, owner: None, blocks: vec![], blocked_by: vec![task_b.id.clone()], metadata: std::collections::HashMap::new() })
+        .create(TaskCreate {
+            subject: "Task C".to_string(),
+            description: "Third task depends on B".to_string(),
+            active_form: None,
+            owner: None,
+            blocks: vec![],
+            blocked_by: vec![task_b.id.clone()],
+            metadata: std::collections::HashMap::new(),
+        })
         .unwrap();
 
     // Verify dependencies
@@ -147,11 +187,27 @@ fn test_complete_workflow_simulation() {
 
     // Create tasks
     let design_task = task_store
-        .create(TaskCreate { subject: "Design Feature X".to_string(), description: "Create design document".to_string(), active_form: None, owner: None, blocks: vec![], blocked_by: vec![], metadata: std::collections::HashMap::new() })
+        .create(TaskCreate {
+            subject: "Design Feature X".to_string(),
+            description: "Create design document".to_string(),
+            active_form: None,
+            owner: None,
+            blocks: vec![],
+            blocked_by: vec![],
+            metadata: std::collections::HashMap::new(),
+        })
         .unwrap();
 
     let impl_task = task_store
-        .create(TaskCreate { subject: "Implement Feature X".to_string(), description: "Write the code".to_string(), active_form: None, owner: None, blocks: vec![], blocked_by: vec![design_task.id.clone()], metadata: std::collections::HashMap::new() })
+        .create(TaskCreate {
+            subject: "Implement Feature X".to_string(),
+            description: "Write the code".to_string(),
+            active_form: None,
+            owner: None,
+            blocks: vec![],
+            blocked_by: vec![design_task.id.clone()],
+            metadata: std::collections::HashMap::new(),
+        })
         .unwrap();
 
     // Advance plan

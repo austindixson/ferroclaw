@@ -194,8 +194,7 @@ fn perform_evaluation(
                         if q >= 90.0 {
                             output.push_str("    ✅ Excellent quality\n");
                         } else if q >= 70.0 {
-                            output
-                                .push_str("    ⚠️  Good quality, room for improvement\n");
+                            output.push_str("    ⚠️  Good quality, room for improvement\n");
                         } else {
                             output.push_str("    ❌ Poor quality, needs improvement\n");
                         }

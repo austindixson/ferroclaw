@@ -713,7 +713,15 @@ fn handle_task(command: TaskCommands) -> anyhow::Result<()> {
             active_form,
             owner,
         } => {
-            let task = store.create(TaskCreate { subject: subject.to_string(), description: description.to_string(), active_form, owner, blocks: vec![], blocked_by: vec![], metadata: std::collections::HashMap::new() })?;
+            let task = store.create(TaskCreate {
+                subject: subject.to_string(),
+                description: description.to_string(),
+                active_form,
+                owner,
+                blocks: vec![],
+                blocked_by: vec![],
+                metadata: std::collections::HashMap::new(),
+            })?;
             println!("✓ Task created: {}", task.id);
             println!("  Subject: {}", task.subject);
             println!("  Status: {}", task.status.as_str());
@@ -796,7 +804,9 @@ fn handle_task(command: TaskCommands) -> anyhow::Result<()> {
             subject,
             description,
         } => {
-            let new_status = status.parse::<TaskStatus>().ok()
+            let new_status = status
+                .parse::<TaskStatus>()
+                .ok()
                 .ok_or_else(|| anyhow::anyhow!("Invalid status: {}", status))?;
 
             match store.update(
@@ -947,7 +957,15 @@ fn handle_plan(command: PlanCommands) -> anyhow::Result<()> {
                 .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
                 .unwrap_or_default();
 
-            let step = plan.create_step(CreateStepInput { subject: subject.to_string(), description: description.to_string(), active_form, acceptance_criteria: criteria, depends_on: dependencies, requires_approval, metadata: HashMap::new() })?;
+            let step = plan.create_step(CreateStepInput {
+                subject: subject.to_string(),
+                description: description.to_string(),
+                active_form,
+                acceptance_criteria: criteria,
+                depends_on: dependencies,
+                requires_approval,
+                metadata: HashMap::new(),
+            })?;
 
             println!("✓ Step created: {}", step.id);
             println!("  Subject: {}", step.subject);
@@ -1037,7 +1055,9 @@ fn handle_plan(command: PlanCommands) -> anyhow::Result<()> {
         },
 
         PlanCommands::UpdateStep { id, status } => {
-            let new_status = status.parse::<PlanStepStatus>().ok()
+            let new_status = status
+                .parse::<PlanStepStatus>()
+                .ok()
                 .ok_or_else(|| anyhow::anyhow!("Invalid status: {}", status))?;
 
             match plan.update_step_status(&id, new_status)? {

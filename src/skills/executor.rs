@@ -80,9 +80,7 @@ impl BashSkillHandler {
 impl ToolHandler for BashSkillHandler {
     fn call<'a>(&'a self, call_id: &'a str, arguments: &'a Value) -> ToolFuture<'a> {
         Box::pin(async move {
-            let command = self
-                .interpolate(arguments)
-                .map_err(FerroError::Tool)?;
+            let command = self.interpolate(arguments).map_err(FerroError::Tool)?;
 
             let output = tokio::process::Command::new("bash")
                 .arg("-c")

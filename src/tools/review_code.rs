@@ -134,7 +134,8 @@ fn review_rust(content: &str, severity: &str, categories: &str) -> Result<String
 
         // Performance issues
         if (categories == "all" || categories == "performance")
-            && line.contains(".collect::<Vec<_>>") && !line.contains("//")
+            && line.contains(".collect::<Vec<_>>")
+            && !line.contains("//")
         {
             issues.push(CodeIssue {
                 line: line_num + 1,
@@ -299,7 +300,8 @@ fn review_python(content: &str, severity: &str, categories: &str) -> Result<Stri
         }
 
         if (categories == "all" || categories == "performance")
-            && line.contains("import *") && !line.contains("#")
+            && line.contains("import *")
+            && !line.contains("#")
         {
             issues.push(CodeIssue {
                 line: line_num + 1,
@@ -311,8 +313,7 @@ fn review_python(content: &str, severity: &str, categories: &str) -> Result<Stri
             score -= 2;
         }
 
-        if (categories == "all" || categories == "style")
-            && line.len() > 88 && !line.contains("#")
+        if (categories == "all" || categories == "style") && line.len() > 88 && !line.contains("#")
         {
             issues.push(CodeIssue {
                 line: line_num + 1,
@@ -405,7 +406,9 @@ fn review_javascript(
         }
 
         if (categories == "all" || categories == "style")
-            && line.contains("var ") && !line.contains("//") && !line.contains("for(")
+            && line.contains("var ")
+            && !line.contains("//")
+            && !line.contains("for(")
         {
             issues.push(CodeIssue {
                 line: line_num + 1,

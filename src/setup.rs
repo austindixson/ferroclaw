@@ -607,7 +607,8 @@ fn prompt_choice(label: &str, min: u32, max: u32, default: u32) -> u32 {
             return default;
         }
         if let Ok(n) = input.parse::<u32>()
-            && n >= min && n <= max
+            && n >= min
+            && n <= max
         {
             return n;
         }

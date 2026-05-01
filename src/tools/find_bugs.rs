@@ -307,7 +307,8 @@ fn find_python_bugs(content: &str, bug_type: &str) -> Result<String, FerroError>
 
         // Memory bugs
         if (bug_type == "all" || bug_type == "memory")
-            && line.contains("list.append(") && !line.contains("//")
+            && line.contains("list.append(")
+            && !line.contains("//")
         {
             let in_loop = lines
                 .get(line_num.saturating_sub(1).saturating_sub(5)..=line_num)
@@ -324,7 +325,9 @@ fn find_python_bugs(content: &str, bug_type: &str) -> Result<String, FerroError>
                     bug_type: "memory".into(),
                     severity: "low".into(),
                     title: "List reallocation in loop".into(),
-                    description: "Consider pre-allocating list with known size or using list comprehension.".into(),
+                    description:
+                        "Consider pre-allocating list with known size or using list comprehension."
+                            .into(),
                     code: line.to_string(),
                 });
             }
@@ -409,7 +412,8 @@ fn find_javascript_bugs(content: &str, bug_type: &str) -> Result<String, FerroEr
 
         // Memory bugs
         if (bug_type == "all" || bug_type == "memory")
-            && line.contains("Array(") && !line.contains("//")
+            && line.contains("Array(")
+            && !line.contains("//")
         {
             bugs.push(BugReport {
                 line: line_num + 1,

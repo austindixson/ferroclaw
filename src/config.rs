@@ -26,7 +26,6 @@ pub struct Config {
     pub channels: ChannelsConfig,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     #[serde(default = "default_model")]
@@ -447,7 +446,6 @@ pub struct MemoryConfig {
     #[serde(default)]
     pub db_path: Option<PathBuf>,
 }
-
 
 /// Skills configuration — controls which skill categories and individual skills are loaded.
 #[derive(Debug, Clone, Serialize, Deserialize)]

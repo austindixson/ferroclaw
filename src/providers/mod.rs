@@ -87,7 +87,9 @@ pub fn resolve_provider(model: &str, config: &Config) -> Result<Box<dyn LlmProvi
     {
         return openai_compatible_provider(cfg, false);
     }
-    if model_l.starts_with("llamacpp:") && let Some(cfg) = &config.providers.llamacpp {
+    if model_l.starts_with("llamacpp:")
+        && let Some(cfg) = &config.providers.llamacpp
+    {
         return openai_compatible_provider(cfg, false);
     }
     if (model_l.starts_with("mistral:") || model_l.starts_with("mistral-"))
@@ -110,7 +112,9 @@ pub fn resolve_provider(model: &str, config: &Config) -> Result<Box<dyn LlmProvi
     {
         return openai_compatible_provider(cfg, false);
     }
-    if model_l.starts_with("bedrock:") && let Some(cfg) = &config.providers.bedrock {
+    if model_l.starts_with("bedrock:")
+        && let Some(cfg) = &config.providers.bedrock
+    {
         return openai_compatible_provider(cfg, false);
     }
 
