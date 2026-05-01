@@ -166,7 +166,7 @@ fn test_app_take_input_trims_whitespace() {
 
 #[test]
 fn test_chat_entry_variants() {
-    let entries = vec![
+    let entries = [
         ChatEntry::UserMessage("hello".into()),
         ChatEntry::AssistantMessage("hi".into()),
         ChatEntry::ToolCall {

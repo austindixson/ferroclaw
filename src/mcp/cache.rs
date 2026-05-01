@@ -24,6 +24,12 @@ pub struct SchemaCache {
     cache_dir: PathBuf,
 }
 
+impl Default for SchemaCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SchemaCache {
     pub fn new() -> Self {
         let dir = cache_dir().join("schemas");

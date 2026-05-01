@@ -133,17 +133,17 @@ fn review_rust(content: &str, severity: &str, categories: &str) -> Result<String
         }
 
         // Performance issues
-        if categories == "all" || categories == "performance" {
-            if line.contains(".collect::<Vec<_>>") && !line.contains("//") {
-                issues.push(CodeIssue {
-                    line: line_num + 1,
-                    severity: "low".into(),
-                    category: "performance".into(),
-                    message: "Unnecessary collection may impact performance".into(),
-                    code: line.to_string(),
-                });
-                score -= 1;
-            }
+        if (categories == "all" || categories == "performance")
+            && line.contains(".collect::<Vec<_>>") && !line.contains("//")
+        {
+            issues.push(CodeIssue {
+                line: line_num + 1,
+                severity: "low".into(),
+                category: "performance".into(),
+                message: "Unnecessary collection may impact performance".into(),
+                code: line.to_string(),
+            });
+            score -= 1;
         }
 
         // Style issues
@@ -198,7 +198,7 @@ fn review_rust(content: &str, severity: &str, categories: &str) -> Result<String
     };
 
     // Ensure score is within bounds
-    score = score.max(0).min(100);
+    score = score.clamp(0, 100);
 
     let mut output = String::new();
     output.push_str("🔍 Code Review Report\n");
@@ -226,7 +226,7 @@ fn review_rust(content: &str, severity: &str, categories: &str) -> Result<String
                 ));
                 output.push_str(&format!("    → {}\n", issue.code.trim()));
             }
-            output.push_str("\n");
+            output.push('\n');
         }
 
         if !medium_severity.is_empty() {
@@ -241,7 +241,7 @@ fn review_rust(content: &str, severity: &str, categories: &str) -> Result<String
             if medium_severity.len() > 5 {
                 output.push_str(&format!("  ... and {} more\n", medium_severity.len() - 5));
             }
-            output.push_str("\n");
+            output.push('\n');
         }
 
         if !low_severity.is_empty() {
@@ -298,30 +298,30 @@ fn review_python(content: &str, severity: &str, categories: &str) -> Result<Stri
             }
         }
 
-        if categories == "all" || categories == "performance" {
-            if line.contains("import *") && !line.contains("#") {
-                issues.push(CodeIssue {
-                    line: line_num + 1,
-                    severity: "low".into(),
-                    category: "performance".into(),
-                    message: "Wildcard imports can impact performance".into(),
-                    code: line.to_string(),
-                });
-                score -= 2;
-            }
+        if (categories == "all" || categories == "performance")
+            && line.contains("import *") && !line.contains("#")
+        {
+            issues.push(CodeIssue {
+                line: line_num + 1,
+                severity: "low".into(),
+                category: "performance".into(),
+                message: "Wildcard imports can impact performance".into(),
+                code: line.to_string(),
+            });
+            score -= 2;
         }
 
-        if categories == "all" || categories == "style" {
-            if line.len() > 88 && !line.contains("#") {
-                issues.push(CodeIssue {
-                    line: line_num + 1,
-                    severity: "low".into(),
-                    category: "style".into(),
-                    message: "Line too long (>79 characters, PEP8 recommended)".into(),
-                    code: line.to_string(),
-                });
-                score -= 1;
-            }
+        if (categories == "all" || categories == "style")
+            && line.len() > 88 && !line.contains("#")
+        {
+            issues.push(CodeIssue {
+                line: line_num + 1,
+                severity: "low".into(),
+                category: "style".into(),
+                message: "Line too long (>79 characters, PEP8 recommended)".into(),
+                code: line.to_string(),
+            });
+            score -= 1;
         }
     }
 
@@ -334,7 +334,7 @@ fn review_python(content: &str, severity: &str, categories: &str) -> Result<Stri
         issues
     };
 
-    score = score.max(0).min(100);
+    score = score.clamp(0, 100);
 
     let mut output = String::new();
     output.push_str("🔍 Python Code Review Report\n");
@@ -404,17 +404,17 @@ fn review_javascript(
             }
         }
 
-        if categories == "all" || categories == "style" {
-            if line.contains("var ") && !line.contains("//") && !line.contains("for(") {
-                issues.push(CodeIssue {
-                    line: line_num + 1,
-                    severity: "low".into(),
-                    category: "style".into(),
-                    message: "Consider using let/const instead of var".into(),
-                    code: line.to_string(),
-                });
-                score -= 1;
-            }
+        if (categories == "all" || categories == "style")
+            && line.contains("var ") && !line.contains("//") && !line.contains("for(")
+        {
+            issues.push(CodeIssue {
+                line: line_num + 1,
+                severity: "low".into(),
+                category: "style".into(),
+                message: "Consider using let/const instead of var".into(),
+                code: line.to_string(),
+            });
+            score -= 1;
         }
 
         if categories == "all" || categories == "complexity" {
@@ -441,7 +441,7 @@ fn review_javascript(
         issues
     };
 
-    score = score.max(0).min(100);
+    score = score.clamp(0, 100);
 
     let mut output = String::new();
     output.push_str("🔍 JavaScript/TypeScript Code Review Report\n");

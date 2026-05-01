@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
     pub agent: AgentConfig,
@@ -26,21 +26,6 @@ pub struct Config {
     pub channels: ChannelsConfig,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            agent: AgentConfig::default(),
-            providers: ProvidersConfig::default(),
-            mcp_servers: HashMap::new(),
-            security: SecurityConfig::default(),
-            gateway: GatewayConfig::default(),
-            telegram: None,
-            memory: MemoryConfig::default(),
-            skills: SkillsConfig::default(),
-            channels: ChannelsConfig::default(),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -57,6 +42,18 @@ pub struct AgentConfig {
     pub max_tool_calls_per_iteration: u32,
     #[serde(default = "default_max_tool_calls_total")]
     pub max_tool_calls_total: u32,
+    /// Optional hard wall-clock budget for a single run (0 disables).
+    #[serde(default = "default_max_wall_clock_ms")]
+    pub max_wall_clock_ms: u64,
+    /// Enable adaptive token/retry behavior when close to the wall-clock deadline.
+    #[serde(default = "default_true")]
+    pub deadline_aware_completion: bool,
+    /// Remaining-ms threshold where we switch to tight completion mode.
+    #[serde(default = "default_deadline_tight_ms")]
+    pub deadline_tight_ms: u64,
+    /// Max tokens used while in tight completion mode.
+    #[serde(default = "default_deadline_tight_max_tokens")]
+    pub deadline_tight_max_tokens: u32,
     #[serde(default = "default_max_response_size")]
     pub max_response_size: usize,
     #[serde(default = "default_system_prompt")]
@@ -72,6 +69,10 @@ impl Default for AgentConfig {
             token_budget: default_token_budget(),
             max_tool_calls_per_iteration: default_max_tool_calls_per_iteration(),
             max_tool_calls_total: default_max_tool_calls_total(),
+            max_wall_clock_ms: default_max_wall_clock_ms(),
+            deadline_aware_completion: default_true(),
+            deadline_tight_ms: default_deadline_tight_ms(),
+            deadline_tight_max_tokens: default_deadline_tight_max_tokens(),
             max_response_size: default_max_response_size(),
             system_prompt: default_system_prompt(),
         }
@@ -82,7 +83,7 @@ fn default_model() -> String {
     "claude-sonnet-4-20250514".into()
 }
 fn default_max_iterations() -> u32 {
-    30
+    150
 }
 fn default_token_budget() -> u64 {
     200_000
@@ -92,6 +93,15 @@ fn default_max_tool_calls_per_iteration() -> u32 {
 }
 fn default_max_tool_calls_total() -> u32 {
     64
+}
+fn default_max_wall_clock_ms() -> u64 {
+    0
+}
+fn default_deadline_tight_ms() -> u64 {
+    1200
+}
+fn default_deadline_tight_max_tokens() -> u32 {
+    96
 }
 fn default_max_response_size() -> usize {
     50_000
@@ -124,7 +134,27 @@ pub struct ProvidersConfig {
     #[serde(default)]
     pub openai: Option<OpenAiConfig>,
     #[serde(default)]
+    pub openai_codex: Option<OpenAiConfig>,
+    #[serde(default)]
+    pub google: Option<OpenAiConfig>,
+    #[serde(default)]
+    pub xai: Option<OpenAiConfig>,
+    #[serde(default)]
+    pub nvidia: Option<OpenAiConfig>,
+    #[serde(default)]
     pub zai: Option<ZaiConfig>,
+    #[serde(default)]
+    pub llamacpp: Option<OpenAiConfig>,
+    #[serde(default)]
+    pub mistral: Option<OpenAiConfig>,
+    #[serde(default)]
+    pub azure_openai: Option<OpenAiConfig>,
+    #[serde(default)]
+    pub github_copilot: Option<OpenAiConfig>,
+    #[serde(default)]
+    pub google_vertex: Option<OpenAiConfig>,
+    #[serde(default)]
+    pub bedrock: Option<OpenAiConfig>,
     #[serde(default)]
     pub openrouter: Option<OpenRouterConfig>,
 }
@@ -134,7 +164,17 @@ impl Default for ProvidersConfig {
         Self {
             anthropic: Some(AnthropicConfig::default()),
             openai: None,
+            openai_codex: None,
+            google: None,
+            xai: None,
+            nvidia: None,
             zai: None,
+            llamacpp: None,
+            mistral: None,
+            azure_openai: None,
+            github_copilot: None,
+            google_vertex: None,
+            bedrock: None,
             openrouter: None,
         }
     }
@@ -148,6 +188,12 @@ pub struct AnthropicConfig {
     pub base_url: String,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    #[serde(default = "default_provider_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+    #[serde(default = "default_provider_max_retries")]
+    pub max_retries: u32,
+    #[serde(default = "default_provider_no_retry_max_tokens_threshold")]
+    pub no_retry_max_tokens_threshold: u32,
 }
 
 impl Default for AnthropicConfig {
@@ -156,6 +202,9 @@ impl Default for AnthropicConfig {
             api_key_env: default_anthropic_api_key_env(),
             base_url: default_anthropic_base_url(),
             max_tokens: default_max_tokens(),
+            request_timeout_ms: default_provider_request_timeout_ms(),
+            max_retries: default_provider_max_retries(),
+            no_retry_max_tokens_threshold: default_provider_no_retry_max_tokens_threshold(),
         }
     }
 }
@@ -169,6 +218,15 @@ fn default_anthropic_base_url() -> String {
 fn default_max_tokens() -> u32 {
     8192
 }
+fn default_provider_request_timeout_ms() -> u64 {
+    15_000
+}
+fn default_provider_max_retries() -> u32 {
+    2
+}
+fn default_provider_no_retry_max_tokens_threshold() -> u32 {
+    128
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAiConfig {
@@ -176,8 +234,33 @@ pub struct OpenAiConfig {
     pub api_key_env: String,
     #[serde(default = "default_openai_base_url")]
     pub base_url: String,
+    #[serde(default = "default_openai_auth_mode")]
+    pub auth_mode: String,
+    #[serde(default = "default_openai_oauth_token_env")]
+    pub oauth_token_env: String,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    #[serde(default = "default_provider_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+    #[serde(default = "default_provider_max_retries")]
+    pub max_retries: u32,
+    #[serde(default = "default_provider_no_retry_max_tokens_threshold")]
+    pub no_retry_max_tokens_threshold: u32,
+}
+
+impl Default for OpenAiConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: default_openai_api_key_env(),
+            base_url: default_openai_base_url(),
+            auth_mode: default_openai_auth_mode(),
+            oauth_token_env: default_openai_oauth_token_env(),
+            max_tokens: default_max_tokens(),
+            request_timeout_ms: default_provider_request_timeout_ms(),
+            max_retries: default_provider_max_retries(),
+            no_retry_max_tokens_threshold: default_provider_no_retry_max_tokens_threshold(),
+        }
+    }
 }
 
 fn default_openai_api_key_env() -> String {
@@ -186,6 +269,12 @@ fn default_openai_api_key_env() -> String {
 fn default_openai_base_url() -> String {
     "https://api.openai.com/v1".into()
 }
+fn default_openai_auth_mode() -> String {
+    "api_key".into()
+}
+fn default_openai_oauth_token_env() -> String {
+    "OPENAI_OAUTH_TOKEN".into()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZaiConfig {
@@ -193,6 +282,27 @@ pub struct ZaiConfig {
     pub api_key_env: String,
     #[serde(default = "default_zai_base_url")]
     pub base_url: String,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_provider_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+    #[serde(default = "default_provider_max_retries")]
+    pub max_retries: u32,
+    #[serde(default = "default_provider_no_retry_max_tokens_threshold")]
+    pub no_retry_max_tokens_threshold: u32,
+}
+
+impl Default for ZaiConfig {
+    fn default() -> Self {
+        Self {
+            api_key_env: default_zai_api_key_env(),
+            base_url: default_zai_base_url(),
+            max_tokens: default_max_tokens(),
+            request_timeout_ms: default_provider_request_timeout_ms(),
+            max_retries: default_provider_max_retries(),
+            no_retry_max_tokens_threshold: default_provider_no_retry_max_tokens_threshold(),
+        }
+    }
 }
 
 fn default_zai_api_key_env() -> String {
@@ -214,6 +324,12 @@ pub struct OpenRouterConfig {
     pub site_name: Option<String>,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    #[serde(default = "default_provider_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+    #[serde(default = "default_provider_max_retries")]
+    pub max_retries: u32,
+    #[serde(default = "default_provider_no_retry_max_tokens_threshold")]
+    pub no_retry_max_tokens_threshold: u32,
 }
 
 fn default_openrouter_api_key_env() -> String {
@@ -326,17 +442,12 @@ pub struct TelegramConfig {
     pub allowed_chat_ids: Vec<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MemoryConfig {
     #[serde(default)]
     pub db_path: Option<PathBuf>,
 }
 
-impl Default for MemoryConfig {
-    fn default() -> Self {
-        Self { db_path: None }
-    }
-}
 
 /// Skills configuration — controls which skill categories and individual skills are loaded.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -546,10 +657,14 @@ pub fn generate_example_config() -> String {
 
 [agent]
 default_model = "claude-sonnet-4-20250514"
-max_iterations = 30
+max_iterations = 150
 token_budget = 200000
 max_tool_calls_per_iteration = 8
 max_tool_calls_total = 64
+max_wall_clock_ms = 0
+deadline_aware_completion = true
+deadline_tight_ms = 1200
+deadline_tight_max_tokens = 96
 
 [providers.anthropic]
 api_key_env = "ANTHROPIC_API_KEY"
@@ -557,10 +672,50 @@ api_key_env = "ANTHROPIC_API_KEY"
 # [providers.openai]
 # api_key_env = "OPENAI_API_KEY"
 # base_url = "https://api.openai.com/v1"
+# auth_mode = "api_key" # or "oauth"
+# oauth_token_env = "OPENAI_OAUTH_TOKEN"
+
+# [providers.openai_codex]
+# api_key_env = "OPENAI_API_KEY"
+# base_url = "https://chatgpt.com/backend-api"
+# auth_mode = "oauth"
+# oauth_token_env = "OPENAI_OAUTH_TOKEN"
+
+# [providers.google]
+# api_key_env = "GEMINI_API_KEY"
+# base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+# [providers.xai]
+# api_key_env = "XAI_API_KEY"
+# base_url = "https://api.x.ai/v1"
 
 # [providers.zai]
 # api_key_env = "ZAI_API_KEY"
 # base_url = "https://api.z.ai/api/paas/v4"
+
+# [providers.llamacpp]
+# api_key_env = "LLAMACPP_API_KEY"
+# base_url = "http://127.0.0.1:8000/v1"
+
+# [providers.mistral]
+# api_key_env = "MISTRAL_API_KEY"
+# base_url = "https://api.mistral.ai/v1"
+
+# [providers.azure_openai]
+# api_key_env = "AZURE_OPENAI_API_KEY"
+# base_url = "https://<resource>.openai.azure.com/openai/v1"
+
+# [providers.github_copilot]
+# api_key_env = "GITHUB_COPILOT_API_KEY"
+# base_url = "https://api.githubcopilot.com"
+
+# [providers.google_vertex]
+# api_key_env = "GOOGLE_VERTEX_API_KEY"
+# base_url = "https://aiplatform.googleapis.com/v1/projects/<project>/locations/<location>/endpoints/openapi"
+
+# [providers.bedrock]
+# api_key_env = "AWS_BEARER_TOKEN_BEDROCK"
+# base_url = "https://bedrock-runtime.<region>.amazonaws.com/openai/v1"
 
 # [providers.openrouter]
 # api_key_env = "OPENROUTER_API_KEY"
@@ -648,7 +803,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.agent.max_iterations, 30);
+        assert_eq!(config.agent.max_iterations, 150);
         assert_eq!(config.agent.max_tool_calls_per_iteration, 8);
         assert_eq!(config.agent.max_tool_calls_total, 64);
         assert_eq!(config.gateway.bind, "127.0.0.1");

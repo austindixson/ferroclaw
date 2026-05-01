@@ -14,16 +14,11 @@ use regex_lite::Regex;
 use serde_json::Value;
 use std::path::Path;
 
-pub mod reporter;
-pub use reporter::{ReviewReport, ReviewSummary, TextReportGenerator, JsonReportGenerator};
+pub use super::reporter::{JsonReportGenerator, ReviewReport, ReviewSummary, TextReportGenerator};
 
-pub mod diff_parser;
-pub mod quality_analyzer;
-pub mod issue_detector;
-
-pub use diff_parser::{DiffParser, DiffHunk};
-pub use quality_analyzer::{QualityAnalyzer, QualityScore};
-pub use issue_detector::{IssueDetector, Issue, Severity, IssueCategory};
+pub use super::diff_parser::{DiffHunk, DiffParser};
+pub use super::issue_detector::{Issue, IssueCategory, IssueDetector, Severity};
+pub use super::quality_analyzer::{QualityAnalyzer, QualityScore};
 
 /// Scope of code review
 #[derive(Debug, Clone)]

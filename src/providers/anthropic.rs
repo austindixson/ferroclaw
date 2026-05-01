@@ -12,15 +12,28 @@ pub struct AnthropicProvider {
     base_url: String,
     #[allow(dead_code)]
     max_tokens: u32,
+    request_timeout_ms: u64,
+    max_retries: u32,
+    no_retry_max_tokens_threshold: u32,
     client: Client,
 }
 
 impl AnthropicProvider {
-    pub fn new(api_key: String, base_url: String, max_tokens: u32) -> Self {
+    pub fn new(
+        api_key: String,
+        base_url: String,
+        max_tokens: u32,
+        request_timeout_ms: u64,
+        max_retries: u32,
+        no_retry_max_tokens_threshold: u32,
+    ) -> Self {
         Self {
             api_key,
             base_url,
             max_tokens,
+            request_timeout_ms,
+            max_retries,
+            no_retry_max_tokens_threshold,
             client: Client::new(),
         }
     }
@@ -82,43 +95,42 @@ impl AnthropicProvider {
         };
 
         // Tool results are sent as user messages with tool_result content blocks
-        if msg.role == Role::Tool {
-            if let Some(tool_call_id) = &msg.tool_call_id {
-                return json!({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": tool_call_id,
-                        "content": msg.text(),
-                    }]
-                });
-            }
+        if msg.role == Role::Tool
+            && let Some(tool_call_id) = &msg.tool_call_id
+        {
+            return json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_call_id,
+                    "content": msg.text(),
+                }]
+            });
         }
 
         // Assistant messages with tool calls
-        if msg.role == Role::Assistant {
-            if let Some(tool_calls) = &msg.tool_calls {
-                let mut content_blocks: Vec<Value> = Vec::new();
-
-                let text = msg.text();
-                if !text.is_empty() {
-                    content_blocks.push(json!({"type": "text", "text": text}));
-                }
-
-                for tc in tool_calls {
-                    content_blocks.push(json!({
-                        "type": "tool_use",
-                        "id": tc.id,
-                        "name": tc.name,
-                        "input": tc.arguments,
-                    }));
-                }
-
-                return json!({
-                    "role": "assistant",
-                    "content": content_blocks,
-                });
+        if msg.role == Role::Assistant
+            && let Some(tool_calls) = &msg.tool_calls
+        {
+            let mut content_blocks: Vec<Value> = Vec::new();
+            let text = msg.text();
+            if !text.is_empty() {
+                content_blocks.push(json!({"type": "text", "text": text}));
             }
+
+            for tc in tool_calls {
+                content_blocks.push(json!({
+                    "type": "tool_use",
+                    "id": tc.id,
+                    "name": tc.name,
+                    "input": tc.arguments,
+                }));
+            }
+
+            return json!({
+                "role": "assistant",
+                "content": content_blocks,
+            });
         }
 
         json!({
@@ -203,36 +215,80 @@ impl LlmProvider for AnthropicProvider {
     ) -> BoxFuture<'a, Result<ProviderResponse>> {
         Box::pin(async move {
             let body = self.build_request_body(messages, tools, model, max_tokens);
+            let configured_attempts = self.max_retries.max(1) as usize;
+            let max_attempts = if max_tokens <= self.no_retry_max_tokens_threshold {
+                1usize
+            } else {
+                configured_attempts
+            };
+            let mut last_err: Option<FerroError> = None;
 
-            let response = self
-                .client
-                .post(format!("{}/v1/messages", self.base_url))
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| FerroError::Provider(format!("HTTP request failed: {e}")))?;
+            for attempt in 1..=max_attempts {
+                let response = match self
+                    .client
+                    .post(format!("{}/v1/messages", self.base_url))
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("content-type", "application/json")
+                    .timeout(tokio::time::Duration::from_millis(self.request_timeout_ms))
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        let retryable = e.is_timeout() || e.is_connect() || e.is_request();
+                        let ferr = FerroError::Provider(format!(
+                            "Anthropic HTTP request failed (attempt {attempt}/{max_attempts}): {e}"
+                        ));
+                        if retryable && attempt < max_attempts {
+                            last_err = Some(ferr);
+                            tokio::time::sleep(tokio::time::Duration::from_millis(
+                                250 * attempt as u64,
+                            ))
+                            .await;
+                            continue;
+                        }
+                        return Err(ferr);
+                    }
+                };
 
-            let status = response.status();
-            let response_body: Value = response
-                .json()
-                .await
-                .map_err(|e| FerroError::Provider(format!("Failed to parse response: {e}")))?;
+                let status = response.status();
+                let response_body: Value = response
+                    .json()
+                    .await
+                    .map_err(|e| FerroError::Provider(format!("Failed to parse response: {e}")))?;
 
-            if !status.is_success() {
-                let error_msg = response_body
-                    .get("error")
-                    .and_then(|e| e.get("message"))
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("Unknown error");
-                return Err(FerroError::Provider(format!(
-                    "Anthropic API error ({status}): {error_msg}"
-                )));
+                if !status.is_success() {
+                    let error_msg = response_body
+                        .get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("Unknown error");
+                    let retryable_status = status.as_u16() == 408
+                        || status.as_u16() == 409
+                        || status.as_u16() == 429
+                        || status.is_server_error();
+                    let ferr = FerroError::Provider(format!(
+                        "Anthropic API error ({status}) attempt {attempt}/{max_attempts}: {error_msg}"
+                    ));
+                    if retryable_status && attempt < max_attempts {
+                        last_err = Some(ferr);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                            250 * attempt as u64,
+                        ))
+                        .await;
+                        continue;
+                    }
+                    return Err(ferr);
+                }
+
+                return self.parse_response(&response_body);
             }
 
-            self.parse_response(&response_body)
+            Err(last_err.unwrap_or_else(|| {
+                FerroError::Provider("Anthropic request failed after retries".into())
+            }))
         })
     }
 
@@ -251,8 +307,14 @@ mod tests {
 
     #[test]
     fn test_format_user_message() {
-        let provider =
-            AnthropicProvider::new("test".into(), "https://api.anthropic.com".into(), 8192);
+        let provider = AnthropicProvider::new(
+            "test".into(),
+            "https://api.anthropic.com".into(),
+            8192,
+            15_000,
+            2,
+            128,
+        );
         let msg = Message::user("Hello");
         let formatted = provider.format_message(&msg);
         assert_eq!(formatted["role"], "user");
@@ -261,8 +323,14 @@ mod tests {
 
     #[test]
     fn test_format_tool_result() {
-        let provider =
-            AnthropicProvider::new("test".into(), "https://api.anthropic.com".into(), 8192);
+        let provider = AnthropicProvider::new(
+            "test".into(),
+            "https://api.anthropic.com".into(),
+            8192,
+            15_000,
+            2,
+            128,
+        );
         let msg = Message::tool_result("tc_123", "file contents here");
         let formatted = provider.format_message(&msg);
         assert_eq!(formatted["role"], "user");
@@ -272,8 +340,14 @@ mod tests {
 
     #[test]
     fn test_parse_response_text_only() {
-        let provider =
-            AnthropicProvider::new("test".into(), "https://api.anthropic.com".into(), 8192);
+        let provider = AnthropicProvider::new(
+            "test".into(),
+            "https://api.anthropic.com".into(),
+            8192,
+            15_000,
+            2,
+            128,
+        );
         let body = json!({
             "content": [{"type": "text", "text": "Hello!"}],
             "usage": {"input_tokens": 10, "output_tokens": 5},
@@ -286,8 +360,14 @@ mod tests {
 
     #[test]
     fn test_parse_response_with_tool_use() {
-        let provider =
-            AnthropicProvider::new("test".into(), "https://api.anthropic.com".into(), 8192);
+        let provider = AnthropicProvider::new(
+            "test".into(),
+            "https://api.anthropic.com".into(),
+            8192,
+            15_000,
+            2,
+            128,
+        );
         let body = json!({
             "content": [
                 {"type": "text", "text": "Let me read that file."},
@@ -309,8 +389,14 @@ mod tests {
 
     #[test]
     fn test_build_request_body() {
-        let provider =
-            AnthropicProvider::new("test".into(), "https://api.anthropic.com".into(), 8192);
+        let provider = AnthropicProvider::new(
+            "test".into(),
+            "https://api.anthropic.com".into(),
+            8192,
+            15_000,
+            2,
+            128,
+        );
         let messages = vec![Message::system("You are helpful."), Message::user("Hello")];
         let tools = vec![ToolDefinition {
             name: "read_file".into(),

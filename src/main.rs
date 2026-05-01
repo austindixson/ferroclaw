@@ -2,7 +2,8 @@ use clap::Parser;
 use ferroclaw::agent::AgentLoop;
 use ferroclaw::benchmark_mode::BenchmarkTelemetry;
 use ferroclaw::cli::{
-    AuditCommands, Cli, Commands, ConfigCommands, McpCommands, PlanCommands, TaskCommands,
+    AuditCommands, AuthCommands, Cli, Commands, ConfigCommands, GatewayCommands, McpCommands,
+    PlanCommands, TaskCommands,
 };
 use ferroclaw::config::{self, Config};
 use ferroclaw::mcp::client::McpClient;
@@ -12,12 +13,16 @@ use ferroclaw::memory::MemoryStore;
 use ferroclaw::providers;
 use ferroclaw::security::audit::AuditLog;
 use ferroclaw::security::capabilities::capabilities_from_config;
-use ferroclaw::tasks::{TaskFilter, TaskStatus, TaskStore};
+use ferroclaw::tasks::{TaskCreate, TaskFilter, TaskStatus, TaskStore};
 use ferroclaw::tool::ToolRegistry;
 use ferroclaw::tools::builtin::register_builtin_tools;
 use ferroclaw::types::{Message, RunStopContract};
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 #[tokio::main]
@@ -45,24 +50,40 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Load config
-    let config = config::load_config(cli.config.as_deref().map(Path::new))?;
+    let config_path_arg = cli.config.clone();
+    let config = config::load_config(config_path_arg.as_deref().map(Path::new))?;
 
     match cli.command {
         Commands::Setup => ferroclaw::setup::run_wizard()?,
         Commands::Run { no_tui } => {
+            ensure_gateway_running(&config, config_path_arg.as_deref().map(Path::new)).await?;
             if no_tui {
                 run_repl(config).await?;
-            } else {
-                run_orchestrator_tui(config).await?;
+            } else if let Err(e) = run_orchestrator_tui(config.clone()).await {
+                // Some terminals/shell wrappers cannot enter raw alternate-screen mode
+                // (e.g. "Device not configured"). Fall back to plain REPL automatically.
+                eprintln!("[ferroclaw] TUI unavailable: {e}");
+                eprintln!("[ferroclaw] Falling back to --no-tui mode.\n");
+                run_repl(config).await?;
             }
         }
         Commands::Exec {
             prompt,
             benchmark_json,
-        } => run_once(config, &prompt, benchmark_json).await?,
+            harness_telemetry_json,
+        } => run_once(config, &prompt, benchmark_json, harness_telemetry_json).await?,
         Commands::Mcp { command } => handle_mcp(config, command).await?,
         Commands::Config { command } => handle_config(command)?,
+        Commands::Auth { command } => handle_auth(command)?,
         Commands::Serve => handle_serve(config).await?,
+        Commands::Gateway { command } => {
+            handle_gateway(
+                config.clone(),
+                config_path_arg.as_deref().map(Path::new),
+                command,
+            )
+            .await?
+        }
         Commands::Audit { command } => handle_audit(config, command)?,
         Commands::Task { command } => handle_task(command)?,
         Commands::Plan { command } => handle_plan(command)?,
@@ -74,6 +95,269 @@ async fn main() -> anyhow::Result<()> {
 async fn run_orchestrator_tui(config: Config) -> anyhow::Result<()> {
     let (agent_loop, _audit) = build_agent(config.clone(), false).await?;
     ferroclaw::tui::hermes_tui::run_hermes_tui(agent_loop, &config).await
+}
+
+fn gateway_health_url(config: &Config) -> String {
+    format!(
+        "http://{}:{}/v1/health",
+        config.gateway.bind.trim(),
+        config.gateway.port
+    )
+}
+
+fn gateway_log_path() -> PathBuf {
+    config::data_dir().join("gateway.log")
+}
+
+fn gateway_process_pattern() -> &'static str {
+    "ferroclaw serve"
+}
+
+fn stop_gateway_processes() -> anyhow::Result<bool> {
+    let pattern = gateway_process_pattern();
+    let status = Command::new("pkill")
+        .arg("-f")
+        .arg(pattern)
+        .status()
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to execute pkill for gateway pattern '{pattern}': {e}")
+        })?;
+
+    // pkill exit codes: 0=matched/terminated, 1=no matches, 2=syntax, 3=fatal.
+    if status.code() == Some(0) {
+        return Ok(true);
+    }
+    if status.code() == Some(1) {
+        return Ok(false);
+    }
+
+    Err(anyhow::anyhow!(
+        "pkill returned unexpected status {} while stopping gateway",
+        status
+    ))
+}
+
+fn gateway_pids() -> anyhow::Result<Vec<u32>> {
+    let pattern = gateway_process_pattern();
+    let output = Command::new("pgrep")
+        .arg("-f")
+        .arg(pattern)
+        .output()
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to execute pgrep for gateway pattern '{pattern}': {e}")
+        })?;
+
+    if output.status.code() == Some(1) {
+        return Ok(Vec::new());
+    }
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "pgrep returned unexpected status {} while inspecting gateway process",
+            output.status
+        ));
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let pids = text
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect::<Vec<_>>();
+    Ok(pids)
+}
+
+fn start_gateway_process(exe: &Path, config_path: Option<&Path>) -> anyhow::Result<()> {
+    let log_path = gateway_log_path();
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open gateway log '{}': {e}", log_path.display()))?;
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| anyhow::anyhow!("Failed to open gateway log '{}': {e}", log_path.display()))?;
+
+    let mut cmd = Command::new(exe);
+    cmd.arg("serve")
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    if let Some(p) = config_path {
+        cmd.arg("--config").arg(p);
+    }
+
+    cmd.spawn().map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to start Ferroclaw Gateway via '{} serve': {e}",
+            exe.display()
+        )
+    })?;
+    Ok(())
+}
+
+async fn is_gateway_healthy(config: &Config) -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_millis(900))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let Ok(resp) = client.get(gateway_health_url(config)).send().await else {
+        return false;
+    };
+    resp.status().is_success()
+}
+
+async fn wait_for_gateway_health(config: &Config, attempts: usize, sleep_ms: u64) -> bool {
+    for _ in 0..attempts {
+        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+        if is_gateway_healthy(config).await {
+            return true;
+        }
+    }
+    false
+}
+
+async fn ensure_gateway_running(config: &Config, config_path: Option<&Path>) -> anyhow::Result<()> {
+    if is_gateway_healthy(config).await {
+        return Ok(());
+    }
+
+    let exe = std::env::current_exe()?;
+    start_gateway_process(&exe, config_path)?;
+
+    if wait_for_gateway_health(config, 15, 250).await {
+        eprintln!(
+            "[ferroclaw] Auto-started Ferroclaw Gateway on {}:{}",
+            config.gateway.bind, config.gateway.port
+        );
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "Ferroclaw Gateway is not healthy on {} after auto-start attempt",
+        gateway_health_url(config)
+    ))
+}
+
+async fn gateway_start(config: &Config, config_path: Option<&Path>) -> anyhow::Result<()> {
+    if is_gateway_healthy(config).await {
+        println!(
+            "Ferroclaw Gateway already healthy on {}",
+            gateway_health_url(config)
+        );
+        return Ok(());
+    }
+
+    let exe = std::env::current_exe()?;
+    start_gateway_process(&exe, config_path)?;
+
+    if wait_for_gateway_health(config, 20, 250).await {
+        println!(
+            "Ferroclaw Gateway started on {} (log: {})",
+            gateway_health_url(config),
+            gateway_log_path().display()
+        );
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "Ferroclaw Gateway start failed health check on {}. See {}",
+        gateway_health_url(config),
+        gateway_log_path().display()
+    ))
+}
+
+fn gateway_tail_lines(path: &Path, lines: usize) -> anyhow::Result<Vec<String>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let file = std::fs::File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut all = Vec::new();
+    for line in reader.lines() {
+        all.push(line.unwrap_or_default());
+    }
+    let start = all.len().saturating_sub(lines);
+    Ok(all[start..].to_vec())
+}
+
+async fn gateway_doctor(config: &Config, lines: usize) -> anyhow::Result<()> {
+    let health_url = gateway_health_url(config);
+    let healthy = is_gateway_healthy(config).await;
+    let pids = gateway_pids()?;
+    let log_path = gateway_log_path();
+
+    println!("Ferroclaw Gateway doctor");
+    println!("- bind: {}", config.gateway.bind);
+    println!("- port: {}", config.gateway.port);
+    println!("- health_url: {}", health_url);
+    println!("- healthy: {}", if healthy { "yes" } else { "no" });
+    println!("- running_pids: {:?}", pids);
+    println!("- log_path: {}", log_path.display());
+
+    let tail = gateway_tail_lines(&log_path, lines)?;
+    if tail.is_empty() {
+        println!("- recent_log: <empty>");
+    } else {
+        println!("- recent_log (last {} lines):", tail.len());
+        for line in tail {
+            println!("  {line}");
+        }
+    }
+
+    Ok(())
+}
+
+async fn gateway_restart(
+    config: &Config,
+    config_path: Option<&Path>,
+    force: bool,
+) -> anyhow::Result<()> {
+    if force {
+        let stopped = stop_gateway_processes()?;
+        println!(
+            "Ferroclaw Gateway force-stop: {}",
+            if stopped {
+                "terminated existing process(es)"
+            } else {
+                "no existing process found"
+            }
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    gateway_start(config, config_path).await
+}
+
+async fn gateway_stop() -> anyhow::Result<()> {
+    let stopped = stop_gateway_processes()?;
+    if stopped {
+        println!("Ferroclaw Gateway stopped.");
+    } else {
+        println!("Ferroclaw Gateway was not running.");
+    }
+    Ok(())
+}
+
+async fn handle_gateway(
+    config: Config,
+    config_path: Option<&Path>,
+    command: GatewayCommands,
+) -> anyhow::Result<()> {
+    match command {
+        GatewayCommands::Start => gateway_start(&config, config_path).await,
+        GatewayCommands::Stop => gateway_stop().await,
+        GatewayCommands::Restart { force } => gateway_restart(&config, config_path, force).await,
+        GatewayCommands::Doctor { lines } => gateway_doctor(&config, lines).await,
+    }
 }
 
 async fn run_repl(config: Config) -> anyhow::Result<()> {
@@ -93,7 +377,11 @@ async fn run_repl(config: Config) -> anyhow::Result<()> {
         std::io::stdout().flush()?;
 
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
+        let n = std::io::stdin().read_line(&mut input)?;
+        if n == 0 {
+            println!("\nEOF received. Exiting.");
+            break;
+        }
         let input = input.trim();
 
         if input.is_empty() {
@@ -115,10 +403,9 @@ async fn run_repl(config: Config) -> anyhow::Result<()> {
                         output: out,
                         total_used,
                     } = event
+                        && cli_is_verbose()
                     {
-                        if cli_is_verbose() {
-                            eprintln!("[tokens: in={inp}, out={out}, total={total_used}]");
-                        }
+                        eprintln!("[tokens: in={inp}, out={out}, total={total_used}]");
                     }
                 }
                 if cli_is_verbose() {
@@ -134,11 +421,17 @@ async fn run_repl(config: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_once(mut config: Config, prompt: &str, benchmark_json: bool) -> anyhow::Result<()> {
+async fn run_once(
+    mut config: Config,
+    prompt: &str,
+    benchmark_json: bool,
+    harness_telemetry_json: bool,
+) -> anyhow::Result<()> {
     if benchmark_json {
         apply_benchmark_profile(&mut config);
     }
 
+    let telemetry_footer = benchmark_json || harness_telemetry_json;
     let (mut agent_loop, _audit) = build_agent(config, benchmark_json).await?;
     let mut history: Vec<Message> = Vec::new();
     let started = std::time::Instant::now();
@@ -150,7 +443,7 @@ async fn run_once(mut config: Config, prompt: &str, benchmark_json: bool) -> any
             } else {
                 outcome.text.clone()
             };
-            if benchmark_json {
+            if telemetry_footer {
                 let telemetry = summarize_events_for_harness(
                     response,
                     events,
@@ -327,6 +620,28 @@ fn handle_config(command: ConfigCommands) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn handle_auth(command: AuthCommands) -> anyhow::Result<()> {
+    match command {
+        AuthCommands::Login { provider } => match provider.to_ascii_lowercase().as_str() {
+            "openai" => ferroclaw::auth::login_openai_oauth()?,
+            other => {
+                return Err(anyhow::anyhow!(
+                    "Unsupported provider for auth login: {other}. Supported: openai"
+                ));
+            }
+        },
+        AuthCommands::Logout { provider } => match provider.to_ascii_lowercase().as_str() {
+            "openai" => ferroclaw::auth::logout_openai_oauth()?,
+            other => {
+                return Err(anyhow::anyhow!(
+                    "Unsupported provider for auth logout: {other}. Supported: openai"
+                ));
+            }
+        },
+    }
+    Ok(())
+}
+
 async fn handle_serve(config: Config) -> anyhow::Result<()> {
     let (agent_loop, _audit) = build_agent(config.clone(), false).await?;
     let agent_loop = Arc::new(Mutex::new(agent_loop));
@@ -335,18 +650,18 @@ async fn handle_serve(config: Config) -> anyhow::Result<()> {
     ));
 
     // Start Telegram bot if configured
-    if let Some(ref tg_config) = config.telegram {
-        if let Some(bot) = ferroclaw::telegram::TelegramBot::from_config(tg_config) {
-            let bot = Arc::new(bot);
-            let agent = Arc::clone(&agent_loop);
-            let hist = Arc::clone(&histories);
-            tokio::spawn(async move {
-                if let Err(e) = bot.run(agent, hist).await {
-                    tracing::error!("Telegram bot stopped: {e}");
-                }
-            });
-            println!("Telegram bot started. Listening for messages...");
-        }
+    if let Some(ref tg_config) = config.telegram
+        && let Some(bot) = ferroclaw::telegram::TelegramBot::from_config(tg_config)
+    {
+        let bot = Arc::new(bot);
+        let agent = Arc::clone(&agent_loop);
+        let hist = Arc::clone(&histories);
+        tokio::spawn(async move {
+            if let Err(e) = bot.run(agent, hist).await {
+                tracing::error!("Telegram bot stopped: {e}");
+            }
+        });
+        println!("Telegram bot started. Listening for messages...");
     }
 
     // Start gateway
@@ -398,15 +713,7 @@ fn handle_task(command: TaskCommands) -> anyhow::Result<()> {
             active_form,
             owner,
         } => {
-            let task = store.create(
-                &subject,
-                &description,
-                active_form,
-                owner,
-                vec![],
-                vec![],
-                std::collections::HashMap::new(),
-            )?;
+            let task = store.create(TaskCreate { subject: subject.to_string(), description: description.to_string(), active_form, owner, blocks: vec![], blocked_by: vec![], metadata: std::collections::HashMap::new() })?;
             println!("✓ Task created: {}", task.id);
             println!("  Subject: {}", task.subject);
             println!("  Status: {}", task.status.as_str());
@@ -414,7 +721,7 @@ fn handle_task(command: TaskCommands) -> anyhow::Result<()> {
 
         TaskCommands::List { status, owner } => {
             let filter = TaskFilter {
-                status: status.and_then(|s| TaskStatus::from_str(&s)),
+                status: status.and_then(|s| s.parse().ok()),
                 owner,
                 blocked_by: None,
             };
@@ -489,19 +796,17 @@ fn handle_task(command: TaskCommands) -> anyhow::Result<()> {
             subject,
             description,
         } => {
-            let new_status = TaskStatus::from_str(&status)
+            let new_status = status.parse::<TaskStatus>().ok()
                 .ok_or_else(|| anyhow::anyhow!("Invalid status: {}", status))?;
 
             match store.update(
                 &id,
-                subject,
-                description,
-                None,
-                Some(new_status),
-                None,
-                None,
-                None,
-                None,
+                ferroclaw::tasks::TaskUpdate {
+                    subject,
+                    description,
+                    status: Some(new_status),
+                    ..Default::default()
+                },
             )? {
                 Some(task) => {
                     println!("✓ Task updated: {}", task.id);
@@ -587,7 +892,7 @@ fn handle_task(command: TaskCommands) -> anyhow::Result<()> {
 }
 
 fn handle_plan(command: PlanCommands) -> anyhow::Result<()> {
-    use ferroclaw::modes::plan::{PlanMode, PlanStepStatus};
+    use ferroclaw::modes::plan::{CreateStepInput, PlanMode, PlanStepStatus};
     use std::collections::HashMap;
 
     let mut plan = PlanMode::new(None)?;
@@ -642,15 +947,7 @@ fn handle_plan(command: PlanCommands) -> anyhow::Result<()> {
                 .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
                 .unwrap_or_default();
 
-            let step = plan.create_step(
-                &subject,
-                &description,
-                active_form,
-                criteria,
-                dependencies,
-                requires_approval,
-                HashMap::new(),
-            )?;
+            let step = plan.create_step(CreateStepInput { subject: subject.to_string(), description: description.to_string(), active_form, acceptance_criteria: criteria, depends_on: dependencies, requires_approval, metadata: HashMap::new() })?;
 
             println!("✓ Step created: {}", step.id);
             println!("  Subject: {}", step.subject);
@@ -740,7 +1037,7 @@ fn handle_plan(command: PlanCommands) -> anyhow::Result<()> {
         },
 
         PlanCommands::UpdateStep { id, status } => {
-            let new_status = PlanStepStatus::from_str(&status)
+            let new_status = status.parse::<PlanStepStatus>().ok()
                 .ok_or_else(|| anyhow::anyhow!("Invalid status: {}", status))?;
 
             match plan.update_step_status(&id, new_status)? {
@@ -821,7 +1118,10 @@ fn handle_plan(command: PlanCommands) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn build_agent(config: Config, benchmark_mode: bool) -> anyhow::Result<(AgentLoop, AuditLog)> {
+async fn build_agent(
+    config: Config,
+    benchmark_mode: bool,
+) -> anyhow::Result<(AgentLoop, AuditLog)> {
     // Initialize memory
     let memory = MemoryStore::new(config.memory.db_path.clone())?;
     let memory = Arc::new(Mutex::new(memory));

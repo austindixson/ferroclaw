@@ -120,10 +120,10 @@ impl GrepTool {
             }
 
             // Check if file matches glob pattern
-            if let Some(glob_pattern) = &args.glob {
-                if !self.glob_matches(glob_pattern, &file_name) {
-                    continue;
-                }
+            if let Some(glob_pattern) = &args.glob
+                && !self.glob_matches(glob_pattern, &file_name)
+            {
+                continue;
             }
 
             files.push(path);
@@ -368,7 +368,7 @@ impl GrepArgs {
         let output_mode = value
             .get("output_mode")
             .and_then(|m| m.as_str())
-            .and_then(|s| OutputMode::from_str(s))
+            .and_then(OutputMode::from_str)
             .unwrap_or(OutputMode::FilesWithMatches);
 
         let context_before = value

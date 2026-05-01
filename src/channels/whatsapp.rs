@@ -37,12 +37,11 @@ impl WhatsAppChannel {
 
     /// Verify webhook challenge from Meta (for webhook registration).
     pub fn verify_webhook(&self, mode: &str, token: &str, challenge: &str) -> Option<String> {
-        if mode == "subscribe" {
-            if let Some(ref verify_token) = self.webhook_verify_token {
-                if token == verify_token {
-                    return Some(challenge.to_string());
-                }
-            }
+        if mode == "subscribe"
+            && let Some(ref verify_token) = self.webhook_verify_token
+            && token == verify_token
+        {
+            return Some(challenge.to_string());
         }
         None
     }

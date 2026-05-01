@@ -103,7 +103,7 @@ fn test_discord_chunk_splits_at_newline() {
     }
     if msg.len() > 2000 {
         let chunks = ferroclaw::channels::discord::chunk_message(&msg, 2000);
-        assert!(chunks.len() >= 1);
+        assert!(!chunks.is_empty());
         for chunk in &chunks {
             assert!(chunk.len() <= 2000);
         }

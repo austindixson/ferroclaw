@@ -68,9 +68,11 @@ fn test_prune_inserts_marker() {
     let original_len = msgs.len();
     ctx.prune_to_fit(&mut msgs);
     if msgs.len() < original_len {
-        // Should have a pruning marker
-        let has_marker = msgs.iter().any(|m| m.text().contains("pruned"));
-        assert!(has_marker, "Expected pruning marker in messages");
+        // Should have a compaction marker
+        let has_marker = msgs
+            .iter()
+            .any(|m| m.text().contains("[Context compaction summary]"));
+        assert!(has_marker, "Expected context compaction marker in messages");
     }
 }
 
@@ -78,7 +80,7 @@ fn test_prune_inserts_marker() {
 fn test_would_exceed_with_large_message() {
     let ctx = ContextManager::new(100);
     let msgs = vec![Message::user("short")];
-    let big = Message::user(&"x".repeat(1000));
+    let big = Message::user("x".repeat(1000));
     assert!(ctx.would_exceed(&msgs, &big));
 }
 

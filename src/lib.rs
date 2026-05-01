@@ -1,4 +1,6 @@
+
 pub mod agent;
+pub mod auth;
 pub mod benchmark_mode;
 pub mod channels;
 pub mod cli;

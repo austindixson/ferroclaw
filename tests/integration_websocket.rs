@@ -61,10 +61,7 @@ async fn test_ws_broadcaster_with_subscriber() {
     let mut rx = broadcaster.subscribe();
 
     // Spawn a task to receive events
-    let handle = tokio::spawn(async move {
-        let event = rx.recv().await.unwrap();
-        event
-    });
+    let handle = tokio::spawn(async move { rx.recv().await.unwrap() });
 
     // Broadcast an event
     let event = WsEvent::agent_state("test-agent".to_string(), AgentState::Executing);

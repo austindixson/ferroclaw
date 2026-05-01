@@ -13,4 +13,4 @@ pub mod store;
 #[cfg(test)]
 mod tasks_test;
 
-pub use store::{Task, TaskFilter, TaskStatus, TaskStore};
+pub use store::{Task, TaskCreate, TaskFilter, TaskStatus, TaskStore, TaskUpdate};

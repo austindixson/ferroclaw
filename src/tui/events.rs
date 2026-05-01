@@ -94,10 +94,10 @@ impl EventHandler {
                     match event::read() {
                         Ok(event::Event::Key(key)) => {
                             // Only send key press events (ignore release/repeat on some platforms)
-                            if key.kind == KeyEventKind::Press {
-                                if event_tx.send(Event::Key(key)).is_err() {
-                                    return;
-                                }
+                            if key.kind == KeyEventKind::Press
+                                && event_tx.send(Event::Key(key)).is_err()
+                            {
+                                return;
                             }
                         }
                         Ok(event::Event::Mouse(mouse)) => {
@@ -106,10 +106,10 @@ impl EventHandler {
                                 MouseEventKind::ScrollDown => Some(Event::MouseScrollDown),
                                 _ => None,
                             };
-                            if let Some(ev) = mapped {
-                                if event_tx.send(ev).is_err() {
-                                    return;
-                                }
+                            if let Some(ev) = mapped
+                                && event_tx.send(ev).is_err()
+                            {
+                                return;
                             }
                         }
                         Ok(event::Event::Resize(w, h)) => {

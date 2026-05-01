@@ -502,24 +502,24 @@ fn find_split_point(text: &str, max_len: usize) -> usize {
     let search_region = &text[..max_len];
 
     // Prefer splitting at double newline (paragraph break)
-    if let Some(pos) = search_region.rfind("\n\n") {
-        if pos > max_len / 2 {
-            return pos + 1;
-        }
+    if let Some(pos) = search_region.rfind("\n\n")
+        && pos > max_len / 2
+    {
+        return pos + 1;
     }
 
     // Then single newline
-    if let Some(pos) = search_region.rfind('\n') {
-        if pos > max_len / 2 {
-            return pos + 1;
-        }
+    if let Some(pos) = search_region.rfind('\n')
+        && pos > max_len / 2
+    {
+        return pos + 1;
     }
 
     // Then space
-    if let Some(pos) = search_region.rfind(' ') {
-        if pos > max_len / 2 {
-            return pos + 1;
-        }
+    if let Some(pos) = search_region.rfind(' ')
+        && pos > max_len / 2
+    {
+        return pos + 1;
     }
 
     // Hard cut as last resort

@@ -164,7 +164,7 @@ pub fn chunk_message(content: &str, max_len: usize) -> Vec<String> {
         let split_at = remaining[..max_len].rfind('\n').unwrap_or(max_len);
 
         chunks.push(remaining[..split_at].to_string());
-        remaining = &remaining[split_at..].trim_start_matches('\n');
+        remaining = remaining[split_at..].trim_start_matches('\n');
     }
 
     chunks

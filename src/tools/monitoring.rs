@@ -44,6 +44,12 @@ pub struct GetLogsHandler {
     log_store: Arc<Mutex<LogStore>>,
 }
 
+impl Default for GetLogsHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GetLogsHandler {
     pub fn new() -> Self {
         Self {
@@ -152,6 +158,12 @@ pub struct TraceExecutionHandler {
     trace_store: Arc<Mutex<TraceStore>>,
 }
 
+impl Default for TraceExecutionHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TraceExecutionHandler {
     pub fn new() -> Self {
         Self {
@@ -242,7 +254,7 @@ async fn format_tree(store: &TraceStore, execution_id: Option<&str>) -> String {
                 call.duration_ms
             ));
         }
-        output.push_str("\n");
+        output.push('\n');
     }
 
     output
@@ -384,6 +396,12 @@ pub fn measure_metrics_meta() -> crate::types::ToolMeta {
 
 pub struct MeasureMetricsHandler {
     metrics_store: Arc<Mutex<MetricsStore>>,
+}
+
+impl Default for MeasureMetricsHandler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MeasureMetricsHandler {

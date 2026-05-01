@@ -18,14 +18,17 @@
 
 use ratatui::{
     Frame,
-    backend::CrosstermBackend,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
-use std::io;
 use std::time::Instant;
+
+#[cfg(feature = "demo")]
+use ratatui::backend::CrosstermBackend;
+#[cfg(feature = "demo")]
+use std::io;
 
 /// Represents the thinking indicator state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

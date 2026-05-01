@@ -38,6 +38,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Security
 sha2 = "0.10"
+base64 = "0.22"
+urlencoding = "2.1"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 

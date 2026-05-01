@@ -148,11 +148,11 @@ impl AgentMessageBus {
         let mut messages = Vec::new();
 
         // First try to get a direct message for this agent
-        if let Some(queue) = self.queues.get_mut(agent_id) {
-            if let Some(msg) = queue.pop_front() {
-                messages.push(msg);
-                return messages; // Return direct message immediately
-            }
+        if let Some(queue) = self.queues.get_mut(agent_id)
+            && let Some(msg) = queue.pop_front()
+        {
+            messages.push(msg);
+            return messages; // Return direct message immediately
         }
 
         // If no direct message, try to get a broadcast message
@@ -172,7 +172,7 @@ impl AgentMessageBus {
 
     /// Check if an agent has pending messages
     pub fn has_messages(&self, agent_id: &str) -> bool {
-        self.queues.get(agent_id).map_or(false, |q| !q.is_empty())
+        self.queues.get(agent_id).is_some_and(|q| !q.is_empty())
             || self
                 .broadcast_queue
                 .iter()

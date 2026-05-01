@@ -18,7 +18,7 @@ pub struct FileEditHandler;
 impl ToolHandler for FileEditHandler {
     fn call<'a>(&'a self, call_id: &'a str, arguments: &'a Value) -> ToolFuture<'a> {
         Box::pin(async move {
-            let result: Result<ToolResult, FerroError> = (|| async {
+            let result: Result<ToolResult, FerroError> = async {
                 let file_path = arguments
                     .get("file_path")
                     .and_then(|p| p.as_str())
@@ -40,9 +40,7 @@ impl ToolHandler for FileEditHandler {
                 // Read the file
                 let content = tokio::fs::read_to_string(&file_path)
                     .await
-                    .map_err(|e| {
-                        FerroError::Tool(format!("Failed to read file '{file_path}': {e}"))
-                    })?;
+                    .map_err(|e| FerroError::Tool(format!("Failed to read file '{file_path}': {e}")))?;
 
                 // Check if old_string exists
                 if !content.contains(&old_string) {
@@ -86,9 +84,7 @@ impl ToolHandler for FileEditHandler {
                 // Create parent directories if they don't exist
                 tokio::fs::create_dir_all(&parent_dir)
                     .await
-                    .map_err(|e| {
-                        FerroError::Tool(format!("Failed to create parent directories: {e}"))
-                    })?;
+                    .map_err(|e| FerroError::Tool(format!("Failed to create parent directories: {e}")))?;
 
                 // Use blocking task for tempfile operations (not async)
                 let file_path_clone = file_path.clone();
@@ -97,30 +93,23 @@ impl ToolHandler for FileEditHandler {
 
                 tokio::task::spawn_blocking(move || -> Result<(), FerroError> {
                     // Create a temporary file in the same directory as the target
-                    let mut temp_file = NamedTempFile::new_in(&parent_dir_clone).map_err(|e| {
-                        FerroError::Tool(format!("Failed to create temporary file: {e}"))
-                    })?;
+                    let mut temp_file = NamedTempFile::new_in(&parent_dir_clone)
+                        .map_err(|e| FerroError::Tool(format!("Failed to create temporary file: {e}")))?;
 
                     // Write the new content to the temp file
                     temp_file
                         .write_all(new_content_clone.as_bytes())
-                        .map_err(|e| {
-                            FerroError::Tool(format!("Failed to write to temporary file: {e}"))
-                        })?;
+                        .map_err(|e| FerroError::Tool(format!("Failed to write to temporary file: {e}")))?;
 
                     // Persist the temp file to the target location (atomic replace)
                     temp_file
                         .persist(&file_path_clone)
-                        .map_err(|e| {
-                            FerroError::Tool(format!("Failed to save file '{file_path_clone}': {e}"))
-                        })?;
+                        .map_err(|e| FerroError::Tool(format!("Failed to save file '{file_path_clone}': {e}")))?;
 
                     Ok(())
                 })
                 .await
-                .map_err(|e| {
-                    FerroError::Tool(format!("Task join error: {e}"))
-                })??;
+                .map_err(|e| FerroError::Tool(format!("Task join error: {e}")))??;
 
                 Ok(ToolResult {
                     call_id: call_id.to_string(),
@@ -129,7 +118,8 @@ impl ToolHandler for FileEditHandler {
                     ),
                     is_error: false,
                 })
-            })().await;
+            }
+            .await;
 
             match result {
                 Ok(r) => Ok(r),

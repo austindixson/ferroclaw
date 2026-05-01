@@ -25,12 +25,17 @@ impl TaskStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+}
+
+impl std::str::FromStr for TaskStatus {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "pending" => Some(Self::Pending),
-            "in_progress" => Some(Self::InProgress),
-            "completed" => Some(Self::Completed),
-            _ => None,
+            "pending" => Ok(Self::Pending),
+            "in_progress" => Ok(Self::InProgress),
+            "completed" => Ok(Self::Completed),
+            _ => Err("invalid task status"),
         }
     }
 }
@@ -64,6 +69,29 @@ pub struct TaskFilter {
 
 pub struct TaskStore {
     conn: Connection,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct TaskCreate {
+    pub subject: String,
+    pub description: String,
+    pub active_form: Option<String>,
+    pub owner: Option<String>,
+    pub blocks: Vec<String>,
+    pub blocked_by: Vec<String>,
+    pub metadata: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct TaskUpdate {
+    pub subject: Option<String>,
+    pub description: Option<String>,
+    pub active_form: Option<Option<String>>,
+    pub status: Option<TaskStatus>,
+    pub owner: Option<Option<String>>,
+    pub blocks: Option<Vec<String>>,
+    pub blocked_by: Option<Vec<String>>,
+    pub metadata: Option<HashMap<String, serde_json::Value>>,
 }
 
 impl TaskStore {
@@ -128,16 +156,16 @@ impl TaskStore {
     }
 
     /// Create a new task
-    pub fn create(
-        &self,
-        subject: &str,
-        description: &str,
-        active_form: Option<String>,
-        owner: Option<String>,
-        blocks: Vec<String>,
-        blocked_by: Vec<String>,
-        metadata: HashMap<String, serde_json::Value>,
-    ) -> Result<Task> {
+    pub fn create(&self, input: TaskCreate) -> Result<Task> {
+        let TaskCreate {
+            subject,
+            description,
+            active_form,
+            owner,
+            blocks,
+            blocked_by,
+            metadata,
+        } = input;
         let id = self.generate_id()?;
 
         // Validate that blocked tasks exist
@@ -318,7 +346,9 @@ impl TaskStore {
                 subject: row.get(1)?,
                 description: row.get(2)?,
                 active_form: row.get(3)?,
-                status: TaskStatus::from_str(&row.get::<_, String>(4)?)
+                status: row
+                    .get::<_, String>(4)?
+                    .parse::<TaskStatus>()
                     .unwrap_or(TaskStatus::Pending),
                 owner: row.get(5)?,
                 blocks: serde_json::from_str(&blocks_str).unwrap_or_default(),
@@ -385,7 +415,9 @@ impl TaskStore {
                     subject: row.get(1)?,
                     description: row.get(2)?,
                     active_form: row.get(3)?,
-                    status: TaskStatus::from_str(&row.get::<_, String>(4)?)
+                    status: row
+                        .get::<_, String>(4)?
+                        .parse::<TaskStatus>()
                         .unwrap_or(TaskStatus::Pending),
                     owner: row.get(5)?,
                     blocks: serde_json::from_str(&blocks_str).unwrap_or_default(),
@@ -403,18 +435,17 @@ impl TaskStore {
     }
 
     /// Update task fields
-    pub fn update(
-        &self,
-        id: &str,
-        subject: Option<String>,
-        description: Option<String>,
-        active_form: Option<Option<String>>,
-        status: Option<TaskStatus>,
-        owner: Option<Option<String>>,
-        blocks: Option<Vec<String>>,
-        blocked_by: Option<Vec<String>>,
-        metadata: Option<HashMap<String, serde_json::Value>>,
-    ) -> Result<Option<Task>> {
+    pub fn update(&self, id: &str, update: TaskUpdate) -> Result<Option<Task>> {
+        let TaskUpdate {
+            subject,
+            description,
+            active_form,
+            status,
+            owner,
+            blocks,
+            blocked_by,
+            metadata,
+        } = update;
         // Check task exists
         let existing = self.get_raw(id)?;
         if existing.is_none() {
@@ -442,7 +473,7 @@ impl TaskStore {
         }
         if let Some(af) = active_form {
             set_clauses.push("active_form = ?");
-            params_vec.push(af.map(|v| v as String).unwrap_or_else(|| String::new()));
+            params_vec.push(af.map(|v| v as String).unwrap_or_else(String::new));
         }
         if let Some(s) = status {
             set_clauses.push("status = ?");
@@ -450,7 +481,7 @@ impl TaskStore {
         }
         if let Some(o) = owner {
             set_clauses.push("owner = ?");
-            params_vec.push(o.map(|v| v as String).unwrap_or_else(|| String::new()));
+            params_vec.push(o.map(|v| v as String).unwrap_or_else(String::new));
         }
         if let Some(b) = blocks {
             let b_json = serde_json::to_string(&b)
@@ -636,7 +667,9 @@ impl TaskStore {
                     subject: row.get(1)?,
                     description: row.get(2)?,
                     active_form: row.get(3)?,
-                    status: TaskStatus::from_str(&row.get::<_, String>(4)?)
+                    status: row
+                        .get::<_, String>(4)?
+                        .parse::<TaskStatus>()
                         .unwrap_or(TaskStatus::Pending),
                     owner: row.get(5)?,
                     blocks: serde_json::from_str(&blocks_str).unwrap_or_default(),
@@ -664,15 +697,7 @@ mod tests {
 
         // Create
         let task = store
-            .create(
-                "Test task",
-                "Test description",
-                Some("Testing".into()),
-                None,
-                vec![],
-                vec![],
-                HashMap::new(),
-            )
+            .create(TaskCreate { subject: "Test task".to_string(), description: "Test description".to_string(), active_form: Some("Testing".into()), owner: None, blocks: vec![], blocked_by: vec![], metadata: HashMap::new() })
             .unwrap();
 
         assert_eq!(task.subject, "Test task");
@@ -699,38 +724,14 @@ mod tests {
     fn test_task_dependencies() {
         let store = TaskStore::in_memory().unwrap();
 
-        let task1 = store
-            .create(
-                "Task 1",
-                "First task",
-                None,
-                None,
-                vec![],
-                vec![],
-                HashMap::new(),
-            )
+        let _task1 = store
+            .create(TaskCreate { subject: "Task 1".to_string(), description: "First task".to_string(), active_form: None, owner: None, blocks: vec![], blocked_by: vec![], metadata: HashMap::new() })
             .unwrap();
         let task2 = store
-            .create(
-                "Task 2",
-                "Second task",
-                None,
-                None,
-                vec![],
-                vec![],
-                HashMap::new(),
-            )
+            .create(TaskCreate { subject: "Task 2".to_string(), description: "Second task".to_string(), active_form: None, owner: None, blocks: vec![], blocked_by: vec![], metadata: HashMap::new() })
             .unwrap();
         let task3 = store
-            .create(
-                "Task 3",
-                "Third task",
-                None,
-                None,
-                vec![],
-                vec![],
-                HashMap::new(),
-            )
+            .create(TaskCreate { subject: "Task 3".to_string(), description: "Third task".to_string(), active_form: None, owner: None, blocks: vec![], blocked_by: vec![], metadata: HashMap::new() })
             .unwrap();
 
         // task2 blocks task3 (task3 depends on task2)
@@ -761,26 +762,10 @@ mod tests {
         let store = TaskStore::in_memory().unwrap();
 
         let task1 = store
-            .create(
-                "Task 1",
-                "First task",
-                None,
-                None,
-                vec![],
-                vec![],
-                HashMap::new(),
-            )
+            .create(TaskCreate { subject: "Task 1".to_string(), description: "First task".to_string(), active_form: None, owner: None, blocks: vec![], blocked_by: vec![], metadata: HashMap::new() })
             .unwrap();
         let task2 = store
-            .create(
-                "Task 2",
-                "Second task",
-                None,
-                None,
-                vec![],
-                vec![],
-                HashMap::new(),
-            )
+            .create(TaskCreate { subject: "Task 2".to_string(), description: "Second task".to_string(), active_form: None, owner: None, blocks: vec![], blocked_by: vec![], metadata: HashMap::new() })
             .unwrap();
 
         // Create dependency: task1 blocks task2
@@ -797,37 +782,13 @@ mod tests {
         let store = TaskStore::in_memory().unwrap();
 
         let task1 = store
-            .create(
-                "Task 1",
-                "First task",
-                None,
-                None,
-                vec![],
-                vec![],
-                HashMap::new(),
-            )
+            .create(TaskCreate { subject: "Task 1".to_string(), description: "First task".to_string(), active_form: None, owner: None, blocks: vec![], blocked_by: vec![], metadata: HashMap::new() })
             .unwrap();
         let task2 = store
-            .create(
-                "Task 2",
-                "Second task",
-                None,
-                None,
-                vec![],
-                vec![],
-                HashMap::new(),
-            )
+            .create(TaskCreate { subject: "Task 2".to_string(), description: "Second task".to_string(), active_form: None, owner: None, blocks: vec![], blocked_by: vec![], metadata: HashMap::new() })
             .unwrap();
         let task3 = store
-            .create(
-                "Task 3",
-                "Third task",
-                None,
-                None,
-                vec![],
-                vec![],
-                HashMap::new(),
-            )
+            .create(TaskCreate { subject: "Task 3".to_string(), description: "Third task".to_string(), active_form: None, owner: None, blocks: vec![], blocked_by: vec![], metadata: HashMap::new() })
             .unwrap();
 
         // Create chain: task1 -> task2 -> task3
@@ -845,26 +806,10 @@ mod tests {
         let store = TaskStore::in_memory().unwrap();
 
         store
-            .create(
-                "Task 1",
-                "First",
-                None,
-                Some("agent1".into()),
-                vec![],
-                vec![],
-                HashMap::new(),
-            )
+            .create(TaskCreate { subject: "Task 1".to_string(), description: "First".to_string(), active_form: None, owner: Some("agent1".into()), blocks: vec![], blocked_by: vec![], metadata: HashMap::new() })
             .unwrap();
         store
-            .create(
-                "Task 2",
-                "Second",
-                None,
-                Some("agent2".into()),
-                vec![],
-                vec![],
-                HashMap::new(),
-            )
+            .create(TaskCreate { subject: "Task 2".to_string(), description: "Second".to_string(), active_form: None, owner: Some("agent2".into()), blocks: vec![], blocked_by: vec![], metadata: HashMap::new() })
             .unwrap();
 
         // Update task2 status
@@ -896,15 +841,7 @@ mod tests {
         let store = TaskStore::in_memory().unwrap();
 
         let task = store
-            .create(
-                "Task 1",
-                "Description",
-                None,
-                None,
-                vec![],
-                vec![],
-                HashMap::new(),
-            )
+            .create(TaskCreate { subject: "Task 1".to_string(), description: "Description".to_string(), active_form: None, owner: None, blocks: vec![], blocked_by: vec![], metadata: HashMap::new() })
             .unwrap();
 
         let mut metadata = HashMap::new();
@@ -914,14 +851,10 @@ mod tests {
         let updated = store
             .update(
                 &task.id,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some(metadata),
+                TaskUpdate {
+                    metadata: Some(metadata),
+                    ..Default::default()
+                },
             )
             .unwrap()
             .unwrap();
@@ -935,15 +868,7 @@ mod tests {
         let store = TaskStore::in_memory().unwrap();
 
         // Try to create task with non-existent dependency
-        let result = store.create(
-            "Task 1",
-            "Description",
-            None,
-            None,
-            vec![],
-            vec!["nonexistent".into()],
-            HashMap::new(),
-        );
+        let result = store.create(TaskCreate { subject: "Task 1".to_string(), description: "Description".to_string(), active_form: None, owner: None, blocks: vec![], blocked_by: vec!["nonexistent".into()], metadata: HashMap::new() });
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));

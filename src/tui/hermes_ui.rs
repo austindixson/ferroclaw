@@ -125,6 +125,7 @@ fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
     out
 }
 
+#[allow(dead_code)]
 fn draw_header(frame: &mut Frame, area: Rect) {
     let title = Paragraph::new(Text::from(vec![Line::from(Span::styled(
         "Ferroclaw",
@@ -208,13 +209,22 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
                 lines.push(Line::from(vec![
                     Span::styled(
                         "●",
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         " You: ",
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(text, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        text,
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]));
                 lines.push(Line::from(""));
             }
@@ -236,10 +246,18 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
                     }
                 }
 
-                while normalized.first().map(|s| s.trim().is_empty()).unwrap_or(false) {
+                while normalized
+                    .first()
+                    .map(|s| s.trim().is_empty())
+                    .unwrap_or(false)
+                {
                     normalized.remove(0);
                 }
-                while normalized.last().map(|s| s.trim().is_empty()).unwrap_or(false) {
+                while normalized
+                    .last()
+                    .map(|s| s.trim().is_empty())
+                    .unwrap_or(false)
+                {
                     normalized.pop();
                 }
                 if normalized.is_empty() {
@@ -272,7 +290,10 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
                 for raw in &normalized {
                     for seg in wrap_to_width(raw, body_width) {
                         let pad = body_width.saturating_sub(seg.chars().count());
-                        lines.push(Line::from(Span::raw(format!("│ {seg}{} │", " ".repeat(pad)))));
+                        lines.push(Line::from(Span::raw(format!(
+                            "│ {seg}{} │",
+                            " ".repeat(pad)
+                        ))));
                     }
                 }
 
@@ -284,7 +305,10 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             ChatEntry::ToolCall { name, args: _ } => {
                 lines.push(Line::from(vec![
-                    Span::styled("◆ tool call: ", Style::default().fg(Color::Rgb(202, 178, 116))),
+                    Span::styled(
+                        "◆ tool call: ",
+                        Style::default().fg(Color::Rgb(202, 178, 116)),
+                    ),
                     Span::styled(
                         name,
                         Style::default()
@@ -303,7 +327,11 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     Color::Rgb(120, 190, 155)
                 };
-                let label = if *is_error { "tool error" } else { "tool result" };
+                let label = if *is_error {
+                    "tool error"
+                } else {
+                    "tool result"
+                };
                 lines.push(Line::from(vec![
                     Span::styled("↳ ", Style::default().fg(color)),
                     Span::styled(
@@ -318,7 +346,10 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
                 for (i, ln) in content.lines().enumerate() {
                     if i >= max_source_lines {
                         lines.push(Line::from(Span::styled(
-                            format!("    … ({} more lines)", content.lines().count() - max_source_lines),
+                            format!(
+                                "    … ({} more lines)",
+                                content.lines().count() - max_source_lines
+                            ),
                             Style::default().fg(MUTED),
                         )));
                         break;
@@ -326,7 +357,10 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
 
                     let wrap_width = inner_width.saturating_sub(4).max(1);
                     for seg in wrap_to_width(ln, wrap_width) {
-                        lines.push(Line::from(Span::styled(format!("    {seg}"), Style::default().fg(color))));
+                        lines.push(Line::from(Span::styled(
+                            format!("    {seg}"),
+                            Style::default().fg(color),
+                        )));
                         shown += 1;
                         if shown >= 24 {
                             lines.push(Line::from(Span::styled(
@@ -395,7 +429,7 @@ fn draw_slash_menu_popup(frame: &mut Frame, app: &App, input_area: Rect) {
     }
 
     let popup_height = (app.slash_menu_items.len().min(8) as u16).saturating_add(2);
-    let popup_width = input_area.width.min(80).max(28);
+    let popup_width = input_area.width.clamp(28, 80);
     let popup_x = input_area.x;
     let popup_y = input_area.y.saturating_sub(popup_height);
     let popup = Rect {
@@ -434,38 +468,55 @@ fn draw_slash_menu_popup(frame: &mut Frame, app: &App, input_area: Rect) {
 
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) {
     let visible_rows = area.height.saturating_sub(2) as usize;
+    let max_cols = area.width.saturating_sub(2) as usize;
     let total_rows = app.input_lines.len();
+
     let start_row = if visible_rows == 0 {
         0
     } else {
-        app.cursor_line.saturating_add(1).saturating_sub(visible_rows)
+        app.cursor_line
+            .saturating_add(1)
+            .saturating_sub(visible_rows)
     }
     .min(total_rows.saturating_sub(1));
     let end_row = (start_row + visible_rows).min(total_rows);
 
+    // Horizontal viewport: keep cursor visible for very long single-line requests.
+    let start_col = if max_cols == 0 {
+        0
+    } else {
+        app.cursor_col.saturating_sub(max_cols.saturating_sub(1))
+    };
+
     let input_text: Vec<Line> = app.input_lines[start_row..end_row]
         .iter()
-        .map(|l: &String| Line::from(l.as_str()))
+        .map(|line: &String| {
+            let visible = line
+                .chars()
+                .skip(start_col)
+                .take(max_cols)
+                .collect::<String>();
+            Line::from(visible)
+        })
         .collect();
 
-    let input = Paragraph::new(Text::from(input_text))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Type your message... ")
-                .border_style(Style::default().fg(BORDER)),
-        )
-        .wrap(Wrap { trim: false });
+    let input = Paragraph::new(Text::from(input_text)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Type your message... ")
+            .border_style(Style::default().fg(BORDER)),
+    );
 
     frame.render_widget(input, area);
 
     let cursor_line_in_view = app.cursor_line.saturating_sub(start_row) as u16;
-    let max_col = area.width.saturating_sub(2) as usize;
-    let cursor_col = app.cursor_col.min(max_col) as u16;
-    let cursor_x = area.x + 1 + cursor_col;
+    let cursor_col_in_view = app
+        .cursor_col
+        .saturating_sub(start_col)
+        .min(max_cols.saturating_sub(1)) as u16;
+    let cursor_x = area.x + 1 + cursor_col_in_view;
     let cursor_y = area.y + 1 + cursor_line_in_view;
 
-    // Keep cursor visible by clamping to the input viewport.
     frame.set_cursor_position((
         cursor_x.min(area.x + area.width.saturating_sub(2)),
         cursor_y.min(area.y + area.height.saturating_sub(2)),

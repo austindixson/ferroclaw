@@ -172,12 +172,11 @@ impl AuditLog {
         if !path.exists() {
             return String::new();
         }
-        if let Ok(content) = std::fs::read_to_string(path) {
-            if let Some(last_line) = content.lines().rev().find(|l| !l.is_empty()) {
-                if let Ok(entry) = serde_json::from_str::<AuditEntry>(last_line) {
-                    return entry.entry_hash;
-                }
-            }
+        if let Ok(content) = std::fs::read_to_string(path)
+            && let Some(last_line) = content.lines().rev().find(|l| !l.is_empty())
+            && let Ok(entry) = serde_json::from_str::<AuditEntry>(last_line)
+        {
+            return entry.entry_hash;
         }
         String::new()
     }

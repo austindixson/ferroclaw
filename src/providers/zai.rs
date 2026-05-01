@@ -30,14 +30,26 @@ const ZAI_MODELS: &[&str] = &[
 pub struct ZaiProvider {
     api_key: String,
     base_url: String,
+    request_timeout_ms: u64,
+    max_retries: u32,
+    no_retry_max_tokens_threshold: u32,
     client: Client,
 }
 
 impl ZaiProvider {
-    pub fn new(api_key: String, base_url: String) -> Self {
+    pub fn new(
+        api_key: String,
+        base_url: String,
+        request_timeout_ms: u64,
+        max_retries: u32,
+        no_retry_max_tokens_threshold: u32,
+    ) -> Self {
         Self {
             api_key,
             base_url,
+            request_timeout_ms,
+            max_retries,
+            no_retry_max_tokens_threshold,
             client: Client::new(),
         }
     }
@@ -49,7 +61,7 @@ impl ZaiProvider {
         model: &str,
         max_tokens: u32,
     ) -> Value {
-        let formatted_messages: Vec<Value> = messages.iter().map(|m| format_message(m)).collect();
+        let formatted_messages: Vec<Value> = messages.iter().map(format_message).collect();
 
         let mut body = json!({
             "model": model,
@@ -89,13 +101,9 @@ impl ZaiProvider {
             .get("message")
             .ok_or_else(|| FerroError::Provider("No message in Zai choice".into()))?;
 
-        let text = message
-            .get("content")
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .to_string();
+        let text = extract_openai_compatible_text(message.get("content"));
 
-        let tool_calls: Vec<ToolCall> = message
+        let mut tool_calls: Vec<ToolCall> = message
             .get("tool_calls")
             .and_then(|tc| tc.as_array())
             .map(|tcs| {
@@ -115,6 +123,19 @@ impl ZaiProvider {
                     .collect()
             })
             .unwrap_or_default();
+
+        if tool_calls.is_empty()
+            && let Some(fc) = message.get("function_call")
+            && let Some(name) = fc.get("name").and_then(|v| v.as_str())
+        {
+            let args_str = fc.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
+            let arguments: Value = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
+            tool_calls.push(ToolCall {
+                id: format!("fc_{}", name),
+                name: name.to_string(),
+                arguments,
+            });
+        }
 
         let usage = body.get("usage").map(|u| TokenUsage {
             input_tokens: u.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0),
@@ -147,6 +168,47 @@ impl ZaiProvider {
     }
 }
 
+fn extract_openai_compatible_text(content: Option<&Value>) -> String {
+    let Some(content) = content else {
+        return String::new();
+    };
+    if let Some(s) = content.as_str() {
+        return s.to_string();
+    }
+    if let Some(arr) = content.as_array() {
+        let mut out = String::new();
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                out.push_str(s);
+                continue;
+            }
+            if let Some(s) = item.get("text").and_then(|v| v.as_str()) {
+                out.push_str(s);
+                continue;
+            }
+            if let Some(s) = item
+                .get("text")
+                .and_then(|v| v.get("value"))
+                .and_then(|v| v.as_str())
+            {
+                out.push_str(s);
+            }
+        }
+        return out;
+    }
+    if let Some(s) = content.get("text").and_then(|v| v.as_str()) {
+        return s.to_string();
+    }
+    if let Some(s) = content
+        .get("text")
+        .and_then(|v| v.get("value"))
+        .and_then(|v| v.as_str())
+    {
+        return s.to_string();
+    }
+    String::new()
+}
+
 impl LlmProvider for ZaiProvider {
     fn complete<'a>(
         &'a self,
@@ -157,35 +219,77 @@ impl LlmProvider for ZaiProvider {
     ) -> BoxFuture<'a, Result<ProviderResponse>> {
         Box::pin(async move {
             let body = self.build_request_body(messages, tools, model, max_tokens);
+            let configured_attempts = self.max_retries.max(1) as usize;
+            let max_attempts = if max_tokens <= self.no_retry_max_tokens_threshold {
+                1usize
+            } else {
+                configured_attempts
+            };
+            let mut last_err: Option<FerroError> = None;
 
-            let response = self
-                .client
-                .post(format!("{}/chat/completions", self.base_url))
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| FerroError::Provider(format!("Zai HTTP request failed: {e}")))?;
+            for attempt in 1..=max_attempts {
+                let response = match self
+                    .client
+                    .post(format!("{}/chat/completions", self.base_url))
+                    .header("Authorization", format!("Bearer {}", self.api_key))
+                    .header("Content-Type", "application/json")
+                    .timeout(tokio::time::Duration::from_millis(self.request_timeout_ms))
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        let retryable = e.is_timeout() || e.is_connect() || e.is_request();
+                        let ferr = FerroError::Provider(format!(
+                            "Zai HTTP request failed (attempt {attempt}/{max_attempts}): {e}"
+                        ));
+                        if retryable && attempt < max_attempts {
+                            last_err = Some(ferr);
+                            tokio::time::sleep(tokio::time::Duration::from_millis(
+                                250 * attempt as u64,
+                            ))
+                            .await;
+                            continue;
+                        }
+                        return Err(ferr);
+                    }
+                };
 
-            let status = response.status();
-            let response_body: Value = response
-                .json()
-                .await
-                .map_err(|e| FerroError::Provider(format!("Failed to parse Zai response: {e}")))?;
+                let status = response.status();
+                let response_body: Value = response.json().await.map_err(|e| {
+                    FerroError::Provider(format!("Failed to parse Zai response: {e}"))
+                })?;
 
-            if !status.is_success() {
-                let error_msg = response_body
-                    .get("error")
-                    .and_then(|e| e.get("message"))
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("Unknown error");
-                return Err(FerroError::Provider(format!(
-                    "Zai API error ({status}): {error_msg}"
-                )));
+                if !status.is_success() {
+                    let error_msg = response_body
+                        .get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("Unknown error");
+                    let retryable_status = status.as_u16() == 408
+                        || status.as_u16() == 409
+                        || status.as_u16() == 429
+                        || status.is_server_error();
+                    let ferr = FerroError::Provider(format!(
+                        "Zai API error ({status}) attempt {attempt}/{max_attempts}: {error_msg}"
+                    ));
+                    if retryable_status && attempt < max_attempts {
+                        last_err = Some(ferr);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                            250 * attempt as u64,
+                        ))
+                        .await;
+                        continue;
+                    }
+                    return Err(ferr);
+                }
+
+                return self.parse_response(&response_body);
             }
 
-            self.parse_response(&response_body)
+            Err(last_err
+                .unwrap_or_else(|| FerroError::Provider("Zai request failed after retries".into())))
         })
     }
 
@@ -221,27 +325,27 @@ fn format_message(msg: &Message) -> Value {
         });
     }
 
-    if msg.role == Role::Assistant {
-        if let Some(tool_calls) = &msg.tool_calls {
-            let tc_json: Vec<Value> = tool_calls
-                .iter()
-                .map(|tc| {
-                    json!({
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": tc.arguments.to_string(),
-                        }
-                    })
+    if msg.role == Role::Assistant
+        && let Some(tool_calls) = &msg.tool_calls
+    {
+        let tc_json: Vec<Value> = tool_calls
+            .iter()
+            .map(|tc| {
+                json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": tc.arguments.to_string(),
+                    }
                 })
-                .collect();
-            return json!({
-                "role": "assistant",
-                "content": msg.text(),
-                "tool_calls": tc_json,
-            });
-        }
+            })
+            .collect();
+        return json!({
+            "role": "assistant",
+            "content": msg.text(),
+            "tool_calls": tc_json,
+        });
     }
 
     json!({
@@ -266,7 +370,13 @@ mod tests {
 
     #[test]
     fn test_parse_zai_text_response() {
-        let provider = ZaiProvider::new("test".into(), "https://api.z.ai/api/paas/v4".into());
+        let provider = ZaiProvider::new(
+            "test".into(),
+            "https://api.z.ai/api/paas/v4".into(),
+            15_000,
+            2,
+            128,
+        );
         let body = json!({
             "choices": [{
                 "message": {
@@ -286,8 +396,39 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_zai_text_response_content_array() {
+        let provider = ZaiProvider::new(
+            "test".into(),
+            "https://api.z.ai/api/paas/v4".into(),
+            15_000,
+            2,
+            128,
+        );
+        let body = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "The weather "},
+                        {"type": "text", "text": "is sunny."}
+                    ]
+                },
+                "finish_reason": "stop"
+            }]
+        });
+        let result = provider.parse_response(&body).unwrap();
+        assert_eq!(result.message.text(), "The weather is sunny.");
+    }
+
+    #[test]
     fn test_parse_zai_tool_call_response() {
-        let provider = ZaiProvider::new("test".into(), "https://api.z.ai/api/paas/v4".into());
+        let provider = ZaiProvider::new(
+            "test".into(),
+            "https://api.z.ai/api/paas/v4".into(),
+            15_000,
+            2,
+            128,
+        );
         let body = json!({
             "choices": [{
                 "message": {
@@ -317,8 +458,43 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_zai_legacy_function_call() {
+        let provider = ZaiProvider::new(
+            "test".into(),
+            "https://api.z.ai/api/paas/v4".into(),
+            15_000,
+            2,
+            128,
+        );
+        let body = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "function_call": {
+                        "name": "get_weather",
+                        "arguments": "{\"city\":\"Beijing\"}"
+                    }
+                },
+                "finish_reason": "function_call"
+            }]
+        });
+        let result = provider.parse_response(&body).unwrap();
+        let tcs = result.message.tool_calls.as_ref().unwrap();
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].name, "get_weather");
+        assert_eq!(tcs[0].arguments["city"], "Beijing");
+    }
+
+    #[test]
     fn test_build_request_with_tools() {
-        let provider = ZaiProvider::new("test".into(), "https://api.z.ai/api/paas/v4".into());
+        let provider = ZaiProvider::new(
+            "test".into(),
+            "https://api.z.ai/api/paas/v4".into(),
+            15_000,
+            2,
+            128,
+        );
         let messages = vec![Message::user("What's the weather?")];
         let tools = vec![ToolDefinition {
             name: "get_weather".into(),

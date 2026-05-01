@@ -198,11 +198,11 @@ fn json_type_to_hint(schema: &serde_json::Value) -> String {
         return format!("{}{}", vals.join(" | "), suffix);
     }
 
-    if json_type == "array" {
-        if let Some(items) = schema.get("items") {
-            let item_type = json_type_to_hint(items);
-            return format!("list[{item_type}]");
-        }
+    if json_type == "array"
+        && let Some(items) = schema.get("items")
+    {
+        let item_type = json_type_to_hint(items);
+        return format!("list[{item_type}]");
     }
 
     match json_type {

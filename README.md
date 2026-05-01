@@ -2,7 +2,7 @@
 
 A security-first, single-binary AI agent framework written in Rust.
 
-**5.4 MB binary. 4 LLM providers. 84 skills across 16 categories. 7 messaging channels. Native MCP + DietMCP. 155 tests. Zero runtime dependencies.**
+**5.4 MB binary. 4 LLM providers. 84 skills across 16 categories. 7 messaging channels. Native MCP + DietMCP. 584 tests. Zero runtime dependencies.**
 
 ```
 ferroclaw (single binary)
@@ -271,13 +271,13 @@ Full benchmarks: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)
 ## Testing
 
 ```bash
-# Run all 155 tests
+# Run full test suite (~584 tests)
 cargo test --all
 
-# Unit tests only (95 tests)
+# Library tests (~343 tests)
 cargo test --lib
 
-# Integration tests (60 tests)
+# Integration tests (~241 tests)
 cargo test --tests
 
 # Run benchmarks

@@ -59,6 +59,7 @@
 //!
 //! ```rust
 //! use ratatui::style::{Color, Modifier, Style};
+//! use ratatui::text::Span;
 //!
 //! // Thinking indicator when agent is running
 //! let indicator = Span::styled(

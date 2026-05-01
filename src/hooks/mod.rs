@@ -337,7 +337,6 @@ impl Default for HookManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ToolCall;
 
     #[test]
     fn test_hook_result_continue() {

@@ -20,7 +20,8 @@
 //! After: 400 tokens (84% reduction)
 //!
 //! ```rust
-//! use ferroclaw::mcp::compression::{compress_schema, CompressionMetrics};
+//! use ferroclaw::mcp::compression::compress_schema;
+//! use serde_json::json;
 //!
 //! let schema = json!({
 //!     "type": "object",
@@ -36,7 +37,7 @@
 //! });
 //!
 //! let compressed = compress_schema(&schema);
-//! println!("Reduced by {}%", compressed.reduction_percent());
+//! println!("Reduced by {}%", compressed.metrics.reduction_percent());
 //! ```
 
 use crate::types::ToolDefinition;
@@ -112,7 +113,7 @@ impl CompressionMetrics {
     /// Check if compression meets target (70-93%)
     pub fn meets_target(&self) -> bool {
         let reduction = self.reduction_percent();
-        reduction >= 70.0 && reduction <= 93.0
+        (70.0..=93.0).contains(&reduction)
     }
 }
 
@@ -191,10 +192,10 @@ fn apply_compression(schema: &Value, config: &CompressionConfig) -> Value {
 
             for (key, value) in map {
                 // Skip metadata fields
-                if config.remove_metadata {
-                    if key == "$schema" || key == "$id" || key == "id" || key == "$ref" {
-                        continue;
-                    }
+                if config.remove_metadata
+                    && (key == "$schema" || key == "$id" || key == "id" || key == "$ref")
+                {
+                    continue;
                 }
 
                 // Skip fields to remove
@@ -207,13 +208,13 @@ fn apply_compression(schema: &Value, config: &CompressionConfig) -> Value {
                 if key == "title" {
                     continue; // Always remove titles, they're redundant with names
                 }
-                if config.remove_validation {
-                    if matches!(
+                if config.remove_validation
+                    && matches!(
                         key.as_str(),
                         "minLength" | "maxLength" | "minimum" | "maximum" | "pattern" | "format"
-                    ) {
-                        continue;
-                    }
+                    )
+                {
+                    continue;
                 }
 
                 // Process description
@@ -222,15 +223,17 @@ fn apply_compression(schema: &Value, config: &CompressionConfig) -> Value {
                     if config.remove_property_descriptions {
                         continue;
                     }
-                    if let Some(desc) = value.as_str() {
-                        if config.max_description_len == 0 {
-                            continue; // Remove entirely
-                        }
+                    if let Some(desc) = value.as_str()
+                        && config.max_description_len != 0
+                    {
                         compressed.insert(
                             key.clone(),
                             Value::String(truncate_description(desc, config.max_description_len)),
                         );
                         continue;
+                    }
+                    if value.as_str().is_some() && config.max_description_len == 0 {
+                        continue; // Remove entirely
                     }
                 }
 
@@ -238,22 +241,21 @@ fn apply_compression(schema: &Value, config: &CompressionConfig) -> Value {
                 let compressed_value = apply_compression(value, config);
 
                 // Special handling for oneOf/anyOf
-                if (key == "oneOf" || key == "anyOf") && config.collapse_oneof {
-                    if let Some(arr) = compressed_value.as_array() {
-                        if let Some(collapsed) = collapse_oneof(arr) {
-                            compressed.insert(key.clone(), collapsed);
-                            continue;
-                        }
-                    }
+                if (key == "oneOf" || key == "anyOf") && config.collapse_oneof
+                    && let Some(arr) = compressed_value.as_array()
+                    && let Some(collapsed) = collapse_oneof(arr)
+                {
+                    compressed.insert(key.clone(), collapsed);
+                    continue;
                 }
 
                 // Special handling for properties (flatten nested objects)
-                if key == "properties" && config.flatten_nested {
-                    if let Some(obj) = compressed_value.as_object() {
-                        let flattened = flatten_properties(obj, config);
-                        compressed.insert(key.clone(), flattened);
-                        continue;
-                    }
+                if key == "properties" && config.flatten_nested
+                    && let Some(obj) = compressed_value.as_object()
+                {
+                    let flattened = flatten_properties(obj, config);
+                    compressed.insert(key.clone(), flattened);
+                    continue;
                 }
 
                 compressed.insert(key.clone(), compressed_value);

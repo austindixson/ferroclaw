@@ -25,6 +25,12 @@ struct RegisteredTool {
     handler: Box<dyn ToolHandler>,
 }
 
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {

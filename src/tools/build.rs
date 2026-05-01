@@ -98,34 +98,18 @@ impl ToolHandler for BuildHandler {
                 .unwrap_or(false);
 
             let project_type = detect_project_type(path).await?;
+            let options = BuildOptions {
+                args,
+                verbose,
+                dry_run,
+                output_path,
+            };
 
             let build_result = match tool {
-                "auto" => {
-                    execute_auto_build(
-                        path,
-                        &project_type,
-                        target,
-                        clean,
-                        args,
-                        verbose,
-                        dry_run,
-                        output_path,
-                    )
-                    .await?
-                }
+                "auto" => execute_auto_build(path, &project_type, target, clean, options).await?,
                 tool_name => {
-                    execute_specific_build(
-                        tool_name,
-                        path,
-                        &project_type,
-                        target,
-                        clean,
-                        args,
-                        verbose,
-                        dry_run,
-                        output_path,
-                    )
-                    .await?
+                    execute_specific_build(tool_name, path, &project_type, target, clean, options)
+                        .await?
                 }
             };
 
@@ -136,6 +120,14 @@ impl ToolHandler for BuildHandler {
             })
         })
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BuildOptions<'a> {
+    args: &'a str,
+    verbose: bool,
+    dry_run: bool,
+    output_path: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -258,7 +250,7 @@ async fn detect_project_type(path: &str) -> Result<ProjectType, FerroError> {
     } else if has_requirements_txt || has_setup_py {
         ProjectType::Python {
             has_requirements: has_requirements_txt,
-            has_setup_py: has_setup_py,
+            has_setup_py,
         }
     } else if has_makefile {
         ProjectType::Make
@@ -282,10 +274,7 @@ async fn execute_auto_build(
     project: &ProjectType,
     target: &str,
     clean: bool,
-    args: &str,
-    verbose: bool,
-    dry_run: bool,
-    output_path: Option<&str>,
+    options: BuildOptions<'_>,
 ) -> Result<String, FerroError> {
     let mut output = String::new();
     output.push_str("🔨 Build Project\n");
@@ -297,9 +286,9 @@ async fn execute_auto_build(
     ));
     output.push_str(&format!("🎯 Target: {}\n", target));
     output.push_str(&format!("🧹 Clean: {}\n", if clean { "Yes" } else { "No" }));
-    output.push_str(&format!("🚀 Build Tool: Auto-detect\n\n"));
+    output.push_str("🚀 Build Tool: Auto-detect\n\n");
 
-    if dry_run {
+    if options.dry_run {
         output.push_str("🔍 [DRY RUN] - Not executing, showing what would be done:\n\n");
     } else {
         output.push_str("🚀 Executing build...\n\n");
@@ -311,10 +300,10 @@ async fn execute_auto_build(
                 cargo_path,
                 target,
                 clean,
-                args,
-                verbose,
-                dry_run,
-                output_path,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
             )
             .await?;
             output.push_str(&result);
@@ -329,56 +318,126 @@ async fn execute_auto_build(
                 yarn_path.as_deref(),
                 target,
                 clean,
-                args,
-                verbose,
-                dry_run,
-                output_path,
+                options,
             )
             .await?;
             output.push_str(&result);
         }
         ProjectType::Python { .. } => {
-            let result =
-                build_python(path, target, clean, args, verbose, dry_run, output_path).await?;
+            let result = build_python(
+                path,
+                target,
+                clean,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
+            )
+            .await?;
             output.push_str(&result);
         }
         ProjectType::Go => {
-            let result = build_go(path, target, clean, args, verbose, dry_run, output_path).await?;
+            let result = build_go(
+                path,
+                target,
+                clean,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
+            )
+            .await?;
             output.push_str(&result);
         }
         ProjectType::Ruby => {
-            let result =
-                build_ruby(path, target, clean, args, verbose, dry_run, output_path).await?;
+            let result = build_ruby(
+                path,
+                target,
+                clean,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
+            )
+            .await?;
             output.push_str(&result);
         }
         ProjectType::Php => {
-            let result =
-                build_php(path, target, clean, args, verbose, dry_run, output_path).await?;
+            let result = build_php(
+                path,
+                target,
+                clean,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
+            )
+            .await?;
             output.push_str(&result);
         }
         ProjectType::Make => {
-            let result =
-                build_make(path, target, clean, args, verbose, dry_run, output_path).await?;
+            let result = build_make(
+                path,
+                target,
+                clean,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
+            )
+            .await?;
             output.push_str(&result);
         }
         ProjectType::CMake => {
-            let result =
-                build_cmake(path, target, clean, args, verbose, dry_run, output_path).await?;
+            let result = build_cmake(
+                path,
+                target,
+                clean,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
+            )
+            .await?;
             output.push_str(&result);
         }
         ProjectType::Gradle => {
-            let result =
-                build_gradle(path, target, clean, args, verbose, dry_run, output_path).await?;
+            let result = build_gradle(
+                path,
+                target,
+                clean,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
+            )
+            .await?;
             output.push_str(&result);
         }
         ProjectType::Maven => {
-            let result =
-                build_maven(path, target, clean, args, verbose, dry_run, output_path).await?;
+            let result = build_maven(
+                path,
+                target,
+                clean,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
+            )
+            .await?;
             output.push_str(&result);
         }
         ProjectType::DotNet => {
-            let result =
-                build_dotnet(path, target, clean, args, verbose, dry_run, output_path).await?;
+            let result = build_dotnet(
+                path,
+                target,
+                clean,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
+            )
+            .await?;
             output.push_str(&result);
         }
         ProjectType::Unknown => {
@@ -398,10 +457,7 @@ async fn execute_specific_build(
     project: &ProjectType,
     target: &str,
     clean: bool,
-    args: &str,
-    verbose: bool,
-    dry_run: bool,
-    output_path: Option<&str>,
+    options: BuildOptions<'_>,
 ) -> Result<String, FerroError> {
     let mut output = String::new();
     output.push_str("🔨 Build Project\n");
@@ -415,7 +471,7 @@ async fn execute_specific_build(
     output.push_str(&format!("🧹 Clean: {}\n", if clean { "Yes" } else { "No" }));
     output.push_str(&format!("🚀 Build Tool: {}\n", tool));
 
-    if dry_run {
+    if options.dry_run {
         output.push_str("🔍 [DRY RUN] - Not executing, showing what would be done:\n\n");
     } else {
         output.push_str("🚀 Executing build...\n\n");
@@ -428,10 +484,10 @@ async fn execute_specific_build(
                     cargo_path,
                     target,
                     clean,
-                    args,
-                    verbose,
-                    dry_run,
-                    output_path,
+                    options.args,
+                    options.verbose,
+                    options.dry_run,
+                    options.output_path,
                 )
                 .await?;
                 output.push_str(&result);
@@ -452,51 +508,113 @@ async fn execute_specific_build(
                 yarn_path.as_deref(),
                 target,
                 clean,
-                args,
-                verbose,
-                dry_run,
-                output_path,
+                options,
             )
             .await?;
             output.push_str(&result);
         }
         "pip" => {
-            let result =
-                build_python(path, target, clean, args, verbose, dry_run, output_path).await?;
+            let result = build_python(
+                path,
+                target,
+                clean,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
+            )
+            .await?;
             output.push_str(&result);
         }
         "go" => {
-            let result = build_go(path, target, clean, args, verbose, dry_run, output_path).await?;
+            let result = build_go(
+                path,
+                target,
+                clean,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
+            )
+            .await?;
             output.push_str(&result);
         }
         "bundler" => {
-            let result =
-                build_ruby(path, target, clean, args, verbose, dry_run, output_path).await?;
+            let result = build_ruby(
+                path,
+                target,
+                clean,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
+            )
+            .await?;
             output.push_str(&result);
         }
         "composer" => {
-            let result =
-                build_php(path, target, clean, args, verbose, dry_run, output_path).await?;
+            let result = build_php(
+                path,
+                target,
+                clean,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
+            )
+            .await?;
             output.push_str(&result);
         }
         "make" => {
-            let result =
-                build_make(path, target, clean, args, verbose, dry_run, output_path).await?;
+            let result = build_make(
+                path,
+                target,
+                clean,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
+            )
+            .await?;
             output.push_str(&result);
         }
         "cmake" => {
-            let result =
-                build_cmake(path, target, clean, args, verbose, dry_run, output_path).await?;
+            let result = build_cmake(
+                path,
+                target,
+                clean,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
+            )
+            .await?;
             output.push_str(&result);
         }
         "gradle" => {
-            let result =
-                build_gradle(path, target, clean, args, verbose, dry_run, output_path).await?;
+            let result = build_gradle(
+                path,
+                target,
+                clean,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
+            )
+            .await?;
             output.push_str(&result);
         }
         "mvn" => {
-            let result =
-                build_maven(path, target, clean, args, verbose, dry_run, output_path).await?;
+            let result = build_maven(
+                path,
+                target,
+                clean,
+                options.args,
+                options.verbose,
+                options.dry_run,
+                options.output_path,
+            )
+            .await?;
             output.push_str(&result);
         }
         _ => {
@@ -533,7 +651,7 @@ async fn build_rust(
             if _clean_result.status.success() {
                 output.push_str("   ✅ Cargo clean complete\n");
             } else {
-                output.push_str(&format!("   ❌ Cargo clean failed\n"));
+                output.push_str("   ❌ Cargo clean failed\n");
             }
         }
     }
@@ -620,10 +738,7 @@ async fn build_nodejs(
     yarn_path: Option<&str>,
     target: &str,
     clean: bool,
-    args: &str,
-    verbose: bool,
-    dry_run: bool,
-    _output_path: Option<&str>,
+    options: BuildOptions<'_>,
 ) -> Result<String, FerroError> {
     let mut output = String::new();
 
@@ -639,7 +754,7 @@ async fn build_nodejs(
     // Clean if requested
     if clean {
         output.push_str(&format!("🧹 Cleaning {} artifacts...\n", tool));
-        if !dry_run {
+        if !options.dry_run {
             let clean_args = match tool_cmd {
                 "npm" => vec!["cache", "clean", "--force"],
                 "yarn" => vec!["cache", "clean", "--force"],
@@ -656,7 +771,7 @@ async fn build_nodejs(
             if clean_result.status.success() {
                 output.push_str("   ✅ Clean complete\n");
             } else {
-                output.push_str(&format!("   ❌ Clean failed\n"));
+                output.push_str("   ❌ Clean failed\n");
             }
         }
     }
@@ -671,11 +786,11 @@ async fn build_nodejs(
         _ => "install",
     });
 
-    if !args.is_empty() {
-        build_args.push_str(args);
+    if !options.args.is_empty() {
+        build_args.push_str(options.args);
     }
 
-    if verbose {
+    if options.verbose {
         output.push_str(&format!(
             "📦 Command: {} {} {}\n",
             tool,
@@ -686,7 +801,7 @@ async fn build_nodejs(
         output.push_str(&format!("📦 Command: {} {}\n", tool, build_args));
     }
 
-    if dry_run {
+    if options.dry_run {
         output.push_str(&format!(
             "\n[DRY RUN] Would execute: {} {} {}\n",
             tool,
@@ -871,7 +986,7 @@ async fn build_go(
     _target: &str,
     clean: bool,
     args: &str,
-    verbose: bool,
+    _verbose: bool,
     dry_run: bool,
     _output_path: Option<&str>,
 ) -> Result<String, FerroError> {
@@ -898,21 +1013,12 @@ async fn build_go(
     let _build_cmd = "go build";
     let build_args = args;
 
-    if verbose {
-        let args_str = if !args.is_empty() {
-            format!("-- {}", args)
-        } else {
-            String::new()
-        };
-        output.push_str(&format!("🐹 Command: go build {}\n", args_str));
+    let args_str = if !args.is_empty() {
+        format!("-- {}", args)
     } else {
-        let args_str = if !args.is_empty() {
-            format!("-- {}", args)
-        } else {
-            String::new()
-        };
-        output.push_str(&format!("🐹 Command: go build {}\n", args_str));
-    }
+        String::new()
+    };
+    output.push_str(&format!("🐹 Command: go build {}\n", args_str));
 
     if dry_run {
         output.push_str("\n[DRY RUN] Would execute: go build\n");
@@ -1116,7 +1222,7 @@ async fn build_make(
     target: &str,
     clean: bool,
     args: &str,
-    verbose: bool,
+    _verbose: bool,
     dry_run: bool,
     _output_path: Option<&str>,
 ) -> Result<String, FerroError> {
@@ -1148,21 +1254,12 @@ async fn build_make(
         build_args.push_str(target);
     }
 
-    if verbose {
-        let args_str = if !args.is_empty() {
-            format!("{} {}", build_args, target)
-        } else {
-            build_args.clone()
-        };
-        output.push_str(&format!("🛠️ Command: make {}\n", args_str));
+    let args_str = if !args.is_empty() {
+        format!("{} {}", build_args, target)
     } else {
-        let args_str = if !args.is_empty() {
-            format!("{} {}", build_args, target)
-        } else {
-            build_args.clone()
-        };
-        output.push_str(&format!("🛠️ Command: make {}\n", args_str));
-    }
+        build_args.clone()
+    };
+    output.push_str(&format!("🛠️ Command: make {}\n", args_str));
 
     if dry_run {
         output.push_str("\n[DRY RUN] Would execute: make build\n");
@@ -1569,9 +1666,7 @@ async fn find_dotnet_project(path: &str) -> Result<String, FerroError> {
         let name = entry.file_name().to_string_lossy().to_string();
 
         // Look for solution or project files
-        if name.ends_with(".sln") {
-            return Ok(name);
-        } else if name.ends_with(".csproj") {
+        if name.ends_with(".sln") || name.ends_with(".csproj") {
             return Ok(name);
         }
     }

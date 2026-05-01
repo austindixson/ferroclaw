@@ -22,6 +22,9 @@ pub struct OpenRouterProvider {
     base_url: String,
     site_url: Option<String>,
     site_name: Option<String>,
+    request_timeout_ms: u64,
+    max_retries: u32,
+    no_retry_max_tokens_threshold: u32,
     client: Client,
 }
 
@@ -31,12 +34,18 @@ impl OpenRouterProvider {
         base_url: String,
         site_url: Option<String>,
         site_name: Option<String>,
+        request_timeout_ms: u64,
+        max_retries: u32,
+        no_retry_max_tokens_threshold: u32,
     ) -> Self {
         Self {
             api_key,
             base_url,
             site_url,
             site_name,
+            request_timeout_ms,
+            max_retries,
+            no_retry_max_tokens_threshold,
             client: Client::new(),
         }
     }
@@ -48,7 +57,7 @@ impl OpenRouterProvider {
         model: &str,
         max_tokens: u32,
     ) -> Value {
-        let formatted_messages: Vec<Value> = messages.iter().map(|m| format_message(m)).collect();
+        let formatted_messages: Vec<Value> = messages.iter().map(format_message).collect();
 
         let mut body = json!({
             "model": model,
@@ -87,13 +96,9 @@ impl OpenRouterProvider {
             .get("message")
             .ok_or_else(|| FerroError::Provider("No message in OpenRouter choice".into()))?;
 
-        let text = message
-            .get("content")
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .to_string();
+        let text = extract_openai_compatible_text(message.get("content"));
 
-        let tool_calls: Vec<ToolCall> = message
+        let mut tool_calls: Vec<ToolCall> = message
             .get("tool_calls")
             .and_then(|tc| tc.as_array())
             .map(|tcs| {
@@ -113,6 +118,19 @@ impl OpenRouterProvider {
                     .collect()
             })
             .unwrap_or_default();
+
+        if tool_calls.is_empty()
+            && let Some(fc) = message.get("function_call")
+            && let Some(name) = fc.get("name").and_then(|v| v.as_str())
+        {
+            let args_str = fc.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
+            let arguments: Value = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
+            tool_calls.push(ToolCall {
+                id: format!("fc_{}", name),
+                name: name.to_string(),
+                arguments,
+            });
+        }
 
         let usage = body.get("usage").map(|u| TokenUsage {
             input_tokens: u.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0),
@@ -145,6 +163,47 @@ impl OpenRouterProvider {
     }
 }
 
+fn extract_openai_compatible_text(content: Option<&Value>) -> String {
+    let Some(content) = content else {
+        return String::new();
+    };
+    if let Some(s) = content.as_str() {
+        return s.to_string();
+    }
+    if let Some(arr) = content.as_array() {
+        let mut out = String::new();
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                out.push_str(s);
+                continue;
+            }
+            if let Some(s) = item.get("text").and_then(|v| v.as_str()) {
+                out.push_str(s);
+                continue;
+            }
+            if let Some(s) = item
+                .get("text")
+                .and_then(|v| v.get("value"))
+                .and_then(|v| v.as_str())
+            {
+                out.push_str(s);
+            }
+        }
+        return out;
+    }
+    if let Some(s) = content.get("text").and_then(|v| v.as_str()) {
+        return s.to_string();
+    }
+    if let Some(s) = content
+        .get("text")
+        .and_then(|v| v.get("value"))
+        .and_then(|v| v.as_str())
+    {
+        return s.to_string();
+    }
+    String::new()
+}
+
 impl LlmProvider for OpenRouterProvider {
     fn complete<'a>(
         &'a self,
@@ -155,7 +214,12 @@ impl LlmProvider for OpenRouterProvider {
     ) -> BoxFuture<'a, Result<ProviderResponse>> {
         Box::pin(async move {
             let body = self.build_request_body(messages, tools, model, max_tokens);
-            let max_attempts = 3usize;
+            let configured_attempts = self.max_retries.max(1) as usize;
+            let max_attempts = if max_tokens <= self.no_retry_max_tokens_threshold {
+                1usize
+            } else {
+                configured_attempts
+            };
             let mut last_err: Option<FerroError> = None;
 
             for attempt in 1..=max_attempts {
@@ -173,7 +237,12 @@ impl LlmProvider for OpenRouterProvider {
                     request = request.header("X-OpenRouter-Title", name.as_str());
                 }
 
-                let response = match request.json(&body).send().await {
+                let response = match request
+                    .timeout(tokio::time::Duration::from_millis(self.request_timeout_ms))
+                    .json(&body)
+                    .send()
+                    .await
+                {
                     Ok(resp) => resp,
                     Err(e) => {
                         let is_retryable = e.is_timeout() || e.is_connect() || e.is_request();
@@ -265,27 +334,27 @@ fn format_message(msg: &Message) -> Value {
         });
     }
 
-    if msg.role == Role::Assistant {
-        if let Some(tool_calls) = &msg.tool_calls {
-            let tc_json: Vec<Value> = tool_calls
-                .iter()
-                .map(|tc| {
-                    json!({
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": tc.arguments.to_string(),
-                        }
-                    })
+    if msg.role == Role::Assistant
+        && let Some(tool_calls) = &msg.tool_calls
+    {
+        let tc_json: Vec<Value> = tool_calls
+            .iter()
+            .map(|tc| {
+                json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": tc.arguments.to_string(),
+                    }
                 })
-                .collect();
-            return json!({
-                "role": "assistant",
-                "content": msg.text(),
-                "tool_calls": tc_json,
-            });
-        }
+            })
+            .collect();
+        return json!({
+            "role": "assistant",
+            "content": msg.text(),
+            "tool_calls": tc_json,
+        });
     }
 
     json!({
@@ -315,6 +384,9 @@ mod tests {
             "https://openrouter.ai/api/v1".into(),
             None,
             None,
+            15_000,
+            2,
+            128,
         );
         let body = json!({
             "choices": [{
@@ -334,12 +406,42 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_openrouter_text_response_content_array() {
+        let provider = OpenRouterProvider::new(
+            "test".into(),
+            "https://openrouter.ai/api/v1".into(),
+            None,
+            None,
+            15_000,
+            2,
+            128,
+        );
+        let body = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Hello "},
+                        {"type": "text", "text": "from array"}
+                    ]
+                },
+                "finish_reason": "stop"
+            }]
+        });
+        let result = provider.parse_response(&body).unwrap();
+        assert_eq!(result.message.text(), "Hello from array");
+    }
+
+    #[test]
     fn test_parse_openrouter_tool_call() {
         let provider = OpenRouterProvider::new(
             "test".into(),
             "https://openrouter.ai/api/v1".into(),
             Some("https://example.com".into()),
             Some("Ferroclaw".into()),
+            15_000,
+            2,
+            128,
         );
         let body = json!({
             "choices": [{
@@ -365,12 +467,45 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_openrouter_legacy_function_call() {
+        let provider = OpenRouterProvider::new(
+            "test".into(),
+            "https://openrouter.ai/api/v1".into(),
+            Some("https://example.com".into()),
+            Some("Ferroclaw".into()),
+            15_000,
+            2,
+            128,
+        );
+        let body = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "function_call": {
+                        "name": "read_file",
+                        "arguments": "{\"path\":\"/tmp/test.txt\"}"
+                    }
+                },
+                "finish_reason": "function_call"
+            }]
+        });
+        let result = provider.parse_response(&body).unwrap();
+        let tcs = result.message.tool_calls.as_ref().unwrap();
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].name, "read_file");
+    }
+
+    #[test]
     fn test_build_request_body() {
         let provider = OpenRouterProvider::new(
             "test".into(),
             "https://openrouter.ai/api/v1".into(),
             None,
             None,
+            15_000,
+            2,
+            128,
         );
         let messages = vec![Message::user("Hello")];
         let body = provider.build_request_body(&messages, &[], "openai/gpt-4o", 4096);

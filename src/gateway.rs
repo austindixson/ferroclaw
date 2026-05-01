@@ -20,7 +20,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -90,7 +90,10 @@ struct ResponsesRequest {
 ///
 /// `_agent_loop` is intentionally unused now: runtime requests are isolated and
 /// served by per-request loop instances to avoid lock contention from long-lived runs.
-pub async fn start_gateway(config: &Config, _agent_loop: Arc<Mutex<AgentLoop>>) -> Result<GatewayHandle> {
+pub async fn start_gateway(
+    config: &Config,
+    _agent_loop: Arc<Mutex<AgentLoop>>,
+) -> Result<GatewayHandle> {
     let gateway = Gateway::from_config(config);
     gateway.validate_bind_safety()?;
 
@@ -183,17 +186,17 @@ async fn responses_handler(
         Ok(Ok((outcome, events))) => {
             let elapsed_ms = started.elapsed().as_millis() as u64;
             let (_, tool_calls) = summarize_events(&events);
-            openai_response(
-                &model,
-                &outcome.text,
+            openai_response(OpenAiResponseParams {
+                model: &model,
+                text: &outcome.text,
                 elapsed_ms,
-                outcome.input_tokens,
-                outcome.output_tokens,
-                outcome.total_tokens,
-                tool_calls.max(outcome.stop.tool_calls_total),
-                false,
-                Some(outcome.stop),
-            )
+                input_tokens: outcome.input_tokens,
+                output_tokens: outcome.output_tokens,
+                total_tokens: outcome.total_tokens,
+                tool_calls: tool_calls.max(outcome.stop.tool_calls_total),
+                timed_out: false,
+                stop: Some(outcome.stop),
+            })
         }
         Ok(Err(e)) => {
             let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -202,17 +205,17 @@ async fn responses_handler(
             );
             let input_tokens = estimate_tokens(&prompt);
             let output_tokens = estimate_tokens(&message);
-            openai_response(
-                &model,
-                &message,
+            openai_response(OpenAiResponseParams {
+                model: &model,
+                text: &message,
                 elapsed_ms,
                 input_tokens,
                 output_tokens,
-                input_tokens + output_tokens,
-                0,
-                false,
-                None,
-            )
+                total_tokens: input_tokens + output_tokens,
+                tool_calls: 0,
+                timed_out: false,
+                stop: None,
+            })
         }
         Err(_) => {
             let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -221,17 +224,17 @@ async fn responses_handler(
             );
             let input_tokens = estimate_tokens(&prompt);
             let output_tokens = estimate_tokens(&message);
-            openai_response(
-                &model,
-                &message,
+            openai_response(OpenAiResponseParams {
+                model: &model,
+                text: &message,
                 elapsed_ms,
                 input_tokens,
                 output_tokens,
-                input_tokens + output_tokens,
-                0,
-                true,
-                None,
-            )
+                total_tokens: input_tokens + output_tokens,
+                tool_calls: 0,
+                timed_out: true,
+                stop: None,
+            })
         }
     }
 }
@@ -256,9 +259,9 @@ fn build_request_agent_loop(config: &Config) -> Result<AgentLoop> {
     ))
 }
 
-fn openai_response(
-    model: &str,
-    text: &str,
+struct OpenAiResponseParams<'a> {
+    model: &'a str,
+    text: &'a str,
     elapsed_ms: u64,
     input_tokens: u64,
     output_tokens: u64,
@@ -266,7 +269,21 @@ fn openai_response(
     tool_calls: u32,
     timed_out: bool,
     stop: Option<RunStopContract>,
-) -> axum::response::Response {
+}
+
+fn openai_response(params: OpenAiResponseParams<'_>) -> axum::response::Response {
+    let OpenAiResponseParams {
+        model,
+        text,
+        elapsed_ms,
+        input_tokens,
+        output_tokens,
+        total_tokens,
+        tool_calls,
+        timed_out,
+        stop,
+    } = params;
+
     let response_id = format!("resp_{}", uuid::Uuid::new_v4().simple());
     (
         StatusCode::OK,
@@ -447,5 +464,4 @@ mod tests {
         ]);
         assert_eq!(extract_input_text(&input).as_deref(), Some("a\nb"));
     }
-
 }

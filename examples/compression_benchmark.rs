@@ -3,7 +3,7 @@
 //! This demonstrates the effectiveness of schema compression on
 //! typical MCP tool definitions.
 
-use ferroclaw::mcp::compression::{compress_schema, compress_tools};
+use ferroclaw::mcp::compression::compress_tools;
 use ferroclaw::types::ToolDefinition;
 use serde_json::json;
 

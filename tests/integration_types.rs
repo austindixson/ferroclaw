@@ -46,7 +46,7 @@ fn test_message_with_tool_calls() {
 #[test]
 fn test_message_token_estimation() {
     let short = Message::user("Hi");
-    let long = Message::user(&"word ".repeat(1000));
+    let long = Message::user("word ".repeat(1000));
 
     let short_tokens = short.estimated_tokens();
     let long_tokens = long.estimated_tokens();
@@ -184,8 +184,8 @@ fn test_context_manager_no_prune_when_under_budget() {
 #[test]
 fn test_context_manager_would_exceed() {
     let ctx = ContextManager::new(100);
-    let msgs = vec![Message::user(&"x".repeat(300))]; // Already ~75 tokens
-    let new_msg = Message::user(&"y".repeat(200)); // ~50 more tokens
+    let msgs = vec![Message::user("x".repeat(300))]; // Already ~75 tokens
+    let new_msg = Message::user("y".repeat(200)); // ~50 more tokens
     assert!(ctx.would_exceed(&msgs, &new_msg));
 }
 

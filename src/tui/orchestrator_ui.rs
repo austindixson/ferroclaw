@@ -39,8 +39,8 @@ fn parse_fenced_segments(input: &str) -> Vec<ParsedSeg> {
     let mut buf: Vec<String> = Vec::new();
 
     for line in lines {
-        if line.starts_with("```") {
-            let rest = line[3..].trim();
+        if let Some(stripped) = line.strip_prefix("```") {
+            let rest = stripped.trim();
             if in_code {
                 if !buf.is_empty() {
                     let body = buf.join("\n");

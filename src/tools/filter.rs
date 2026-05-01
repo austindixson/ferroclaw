@@ -23,7 +23,7 @@ impl FilteredToolRegistry {
     /// If `allowed_tools` is None or empty, all tools are allowed.
     /// Otherwise, only tools with names in `allowed_tools` are accessible.
     pub fn new(registry: Arc<ToolRegistry>, allowed_tools: Option<Vec<String>>) -> Self {
-        let allowed = if allowed_tools.as_ref().map_or(false, |t| !t.is_empty()) {
+        let allowed = if allowed_tools.as_ref().is_some_and(|t| !t.is_empty()) {
             Some(allowed_tools.unwrap().into_iter().collect())
         } else {
             None

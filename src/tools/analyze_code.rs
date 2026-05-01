@@ -267,11 +267,11 @@ fn analyze_rust_file(content: &str, analysis_type: &str) -> Result<String, Ferro
     }
 
     let mut output = String::new();
-    output.push_str(&format!("🦀 Rust Code Analysis\n"));
-    output.push_str(&format!("═══════════════════════════════════════\n\n"));
+    output.push_str("🦀 Rust Code Analysis\n");
+    output.push_str("═══════════════════════════════════════\n\n");
 
     if analysis_type == "structure" || analysis_type == "all" {
-        output.push_str(&format!("📊 Structure\n"));
+        output.push_str("📊 Structure\n");
         output.push_str(&format!("  Modules:     {}\n", mods.len()));
         output.push_str(&format!("  Structs:     {}\n", structs.len()));
         output.push_str(&format!("  Enums:       {}\n", enums.len()));
@@ -282,11 +282,11 @@ fn analyze_rust_file(content: &str, analysis_type: &str) -> Result<String, Ferro
         output.push_str(&format!("  Constants:   {}\n", consts.len()));
         output.push_str(&format!("  Statics:     {}\n", statics.len()));
         output.push_str(&format!("  Type Aliases: {}\n", types.len()));
-        output.push_str("\n");
+        output.push('\n');
     }
 
     if analysis_type == "complexity" || analysis_type == "all" {
-        output.push_str(&format!("📈 Complexity Metrics\n"));
+        output.push_str("📈 Complexity Metrics\n");
         output.push_str(&format!("  Total Lines:     {}\n", lines));
         output.push_str(&format!("  Code Lines:      {}\n", code_lines));
         output.push_str(&format!("  Comment Lines:   {}\n", comment_lines));
@@ -296,18 +296,18 @@ fn analyze_rust_file(content: &str, analysis_type: &str) -> Result<String, Ferro
             0
         };
         output.push_str(&format!("  Comment Ratio:   {}%\n", comment_ratio));
-        output.push_str("\n");
+        output.push('\n');
     }
 
     if analysis_type == "all" && !functions.is_empty() {
-        output.push_str(&format!("📝 Functions:\n"));
+        output.push_str("📝 Functions:\n");
         for fn_name in functions.iter().take(10) {
             output.push_str(&format!("  • {}\n", fn_name));
         }
         if functions.len() > 10 {
             output.push_str(&format!("  ... and {} more\n", functions.len() - 10));
         }
-        output.push_str("\n");
+        output.push('\n');
     }
 
     Ok(output)
@@ -379,19 +379,19 @@ fn analyze_python_file(content: &str, analysis_type: &str) -> Result<String, Fer
     }
 
     let mut output = String::new();
-    output.push_str(&format!("🐍 Python Code Analysis\n"));
-    output.push_str(&format!("═══════════════════════════════════════\n\n"));
+    output.push_str("🐍 Python Code Analysis\n");
+    output.push_str("═══════════════════════════════════════\n\n");
 
     if analysis_type == "structure" || analysis_type == "all" {
-        output.push_str(&format!("📊 Structure\n"));
+        output.push_str("📊 Structure\n");
         output.push_str(&format!("  Classes:     {}\n", classes.len()));
         output.push_str(&format!("  Functions:   {}\n", functions.len()));
         output.push_str(&format!("  Imports:     {}\n", imports.len()));
-        output.push_str("\n");
+        output.push('\n');
     }
 
     if analysis_type == "complexity" || analysis_type == "all" {
-        output.push_str(&format!("📈 Complexity Metrics\n"));
+        output.push_str("📈 Complexity Metrics\n");
         output.push_str(&format!("  Total Lines:     {}\n", lines));
         output.push_str(&format!("  Code Lines:      {}\n", code_lines));
         output.push_str(&format!("  Comment Lines:   {}\n", comment_lines));
@@ -401,7 +401,7 @@ fn analyze_python_file(content: &str, analysis_type: &str) -> Result<String, Fer
             0
         };
         output.push_str(&format!("  Comment Ratio:   {}%\n", comment_ratio));
-        output.push_str("\n");
+        output.push('\n');
     }
 
     Ok(output)
@@ -445,7 +445,7 @@ fn analyze_javascript_file(content: &str, analysis_type: &str) -> Result<String,
                 if let Some(idx) = trimmed.find("function ") {
                     &trimmed[idx + 9..]
                 } else if let Some(idx) = trimmed.find("=") {
-                    &trimmed[..idx].trim()
+                    trimmed[..idx].trim()
                 } else {
                     ""
                 }
@@ -496,20 +496,20 @@ fn analyze_javascript_file(content: &str, analysis_type: &str) -> Result<String,
     }
 
     let mut output = String::new();
-    output.push_str(&format!("📜 JavaScript/TypeScript Code Analysis\n"));
-    output.push_str(&format!("════════════════════════════════════════════\n\n"));
+    output.push_str("📜 JavaScript/TypeScript Code Analysis\n");
+    output.push_str("════════════════════════════════════════════\n\n");
 
     if analysis_type == "structure" || analysis_type == "all" {
-        output.push_str(&format!("📊 Structure\n"));
+        output.push_str("📊 Structure\n");
         output.push_str(&format!("  Classes:    {}\n", classes.len()));
         output.push_str(&format!("  Functions:  {}\n", functions.len()));
         output.push_str(&format!("  Imports:    {}\n", imports.len()));
         output.push_str(&format!("  Exports:    {}\n", exports.len()));
-        output.push_str("\n");
+        output.push('\n');
     }
 
     if analysis_type == "complexity" || analysis_type == "all" {
-        output.push_str(&format!("📈 Complexity Metrics\n"));
+        output.push_str("📈 Complexity Metrics\n");
         output.push_str(&format!("  Total Lines:     {}\n", lines));
         output.push_str(&format!("  Code Lines:      {}\n", code_lines));
         output.push_str(&format!("  Comment Lines:   {}\n", comment_lines));
@@ -519,7 +519,7 @@ fn analyze_javascript_file(content: &str, analysis_type: &str) -> Result<String,
             0
         };
         output.push_str(&format!("  Comment Ratio:   {}%\n", comment_ratio));
-        output.push_str("\n");
+        output.push('\n');
     }
 
     Ok(output)
@@ -528,7 +528,7 @@ fn analyze_javascript_file(content: &str, analysis_type: &str) -> Result<String,
 async fn analyze_directory(path: &str, _analysis_type: &str) -> Result<String, FerroError> {
     let mut output = String::new();
     output.push_str(&format!("📁 Directory Analysis: {}\n", path));
-    output.push_str(&format!("═══════════════════════════════════════\n\n"));
+    output.push_str("═══════════════════════════════════════\n\n");
 
     let mut entries = tokio::fs::read_dir(path)
         .await
@@ -561,45 +561,45 @@ async fn analyze_directory(path: &str, _analysis_type: &str) -> Result<String, F
         }
     }
 
-    output.push_str(&format!("📊 Overview\n"));
+    output.push_str("📊 Overview\n");
     output.push_str(&format!("  Directories: {}\n", dir_count));
     output.push_str(&format!("  Files:       {}\n", file_count));
     output.push_str(&format!("  Rust files:  {}\n", rust_files.len()));
     output.push_str(&format!("  Python files: {}\n", python_files.len()));
     output.push_str(&format!("  JS/TS files:  {}\n", js_files.len()));
-    output.push_str("\n");
+    output.push('\n');
 
     if !rust_files.is_empty() {
-        output.push_str(&format!("🦀 Rust Files:\n"));
+        output.push_str("🦀 Rust Files:\n");
         for file in rust_files.iter().take(5) {
             output.push_str(&format!("  • {}\n", file));
         }
         if rust_files.len() > 5 {
             output.push_str(&format!("  ... and {} more\n", rust_files.len() - 5));
         }
-        output.push_str("\n");
+        output.push('\n');
     }
 
     if !python_files.is_empty() {
-        output.push_str(&format!("🐍 Python Files:\n"));
+        output.push_str("🐍 Python Files:\n");
         for file in python_files.iter().take(5) {
             output.push_str(&format!("  • {}\n", file));
         }
         if python_files.len() > 5 {
             output.push_str(&format!("  ... and {} more\n", python_files.len() - 5));
         }
-        output.push_str("\n");
+        output.push('\n');
     }
 
     if !js_files.is_empty() {
-        output.push_str(&format!("📜 JS/TS Files:\n"));
+        output.push_str("📜 JS/TS Files:\n");
         for file in js_files.iter().take(5) {
             output.push_str(&format!("  • {}\n", file));
         }
         if js_files.len() > 5 {
             output.push_str(&format!("  ... and {} more\n", js_files.len() - 5));
         }
-        output.push_str("\n");
+        output.push('\n');
     }
 
     Ok(output)

@@ -3,7 +3,7 @@
 //! This example shows real-world compression ratios achieved
 //! by the compression module on typical MCP tool schemas.
 
-use ferroclaw::mcp::compression::{CompressionConfig, SchemaAnalyzer, compress_schema};
+use ferroclaw::mcp::compression::{SchemaAnalyzer, compress_schema};
 use serde_json::json;
 
 fn main() {

@@ -33,9 +33,12 @@ pub enum Commands {
 
     /// Execute a single prompt and exit
     Exec {
-        /// Emit machine-readable benchmark telemetry footer for harness adapters.
+        /// Emit machine-readable benchmark telemetry footer and apply benchmark profile.
         #[arg(long)]
         benchmark_json: bool,
+        /// Emit machine-readable telemetry footer without benchmark profile changes.
+        #[arg(long)]
+        harness_telemetry_json: bool,
         /// The prompt to execute
         prompt: String,
     },
@@ -52,8 +55,20 @@ pub enum Commands {
         command: ConfigCommands,
     },
 
+    /// Authentication helpers (OAuth/token bootstrap)
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommands,
+    },
+
     /// Start HTTP gateway and messaging bots
     Serve,
+
+    /// Ferroclaw Gateway helper commands
+    Gateway {
+        #[command(subcommand)]
+        command: GatewayCommands,
+    },
 
     /// Verify audit log integrity
     Audit {
@@ -112,6 +127,40 @@ pub enum ConfigCommands {
     Show,
     /// Print config file path
     Path,
+}
+
+#[derive(Subcommand)]
+pub enum AuthCommands {
+    /// Login using OAuth token flow helper
+    Login {
+        /// Provider to authenticate (currently: openai)
+        provider: String,
+    },
+    /// Remove stored OAuth token
+    Logout {
+        /// Provider to logout (currently: openai)
+        provider: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayCommands {
+    /// Start the Ferroclaw Gateway in the background
+    Start,
+    /// Stop any running Ferroclaw Gateway process
+    Stop,
+    /// Restart the Ferroclaw Gateway
+    Restart {
+        /// Force restart by stopping any existing process first
+        #[arg(long, default_value_t = true)]
+        force: bool,
+    },
+    /// Diagnose gateway config, process, health, and recent logs
+    Doctor {
+        /// Number of log lines to print from the gateway log tail
+        #[arg(long, default_value_t = 20)]
+        lines: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -275,4 +324,43 @@ pub enum PlanCommands {
 
     /// Show execution waves
     Waves,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parses_gateway_start() {
+        let cli = Cli::parse_from(["ferroclaw", "gateway", "start"]);
+        match cli.command {
+            Commands::Gateway {
+                command: GatewayCommands::Start,
+            } => {}
+            _ => panic!("expected gateway start"),
+        }
+    }
+
+    #[test]
+    fn parses_gateway_restart_force() {
+        let cli = Cli::parse_from(["ferroclaw", "gateway", "restart", "--force"]);
+        match cli.command {
+            Commands::Gateway {
+                command: GatewayCommands::Restart { force },
+            } => assert!(force),
+            _ => panic!("expected gateway restart"),
+        }
+    }
+
+    #[test]
+    fn parses_gateway_doctor_lines() {
+        let cli = Cli::parse_from(["ferroclaw", "gateway", "doctor", "--lines", "5"]);
+        match cli.command {
+            Commands::Gateway {
+                command: GatewayCommands::Doctor { lines },
+            } => assert_eq!(lines, 5),
+            _ => panic!("expected gateway doctor"),
+        }
+    }
 }

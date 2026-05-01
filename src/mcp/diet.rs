@@ -275,10 +275,10 @@ fn format_minified(content: &str) -> String {
 
 /// CSV format: attempt to extract tabular data.
 fn format_csv(content: &str) -> String {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
-        if let Some(arr) = value.as_array() {
-            return array_to_csv(arr);
-        }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(content)
+        && let Some(arr) = value.as_array()
+    {
+        return array_to_csv(arr);
     }
     content.to_string()
 }

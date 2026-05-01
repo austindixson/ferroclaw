@@ -46,7 +46,7 @@ pub struct CommitHandler;
 impl ToolHandler for CommitHandler {
     fn call<'a>(&'a self, call_id: &'a str, arguments: &'a Value) -> ToolFuture<'a> {
         Box::pin(async move {
-            let result: Result<ToolResult> = (|| async {
+            let result: Result<ToolResult> = async {
                 // Parse arguments
                 let yes = arguments
                     .get("yes")
@@ -84,7 +84,8 @@ impl ToolHandler for CommitHandler {
                 let recent_commits = get_recent_commits(&repo, 10)?;
 
                 // Generate commit message
-                let commit_message = generate_commit_message(&staged_changes, &diff, &recent_commits)?;
+                let commit_message =
+                    generate_commit_message(&staged_changes, &diff, &recent_commits)?;
 
                 // Interactive approval (if not auto-approve)
                 if !yes {
@@ -114,7 +115,7 @@ impl ToolHandler for CommitHandler {
                     ),
                     is_error: false,
                 })
-            })()
+            }
             .await;
 
             result
@@ -463,7 +464,7 @@ fn create_commit(repo: &Repository, message: &str, _amend: bool) -> Result<Strin
             &signature,
             message,
             &tree,
-            parents.iter().map(|&c| c).collect::<Vec<_>>().as_slice(),
+            &parents,
         )
         .map_err(|e| FerroError::Tool(format!("Failed to create commit: {}", e)))?;
 

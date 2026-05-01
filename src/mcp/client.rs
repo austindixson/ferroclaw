@@ -60,14 +60,13 @@ impl McpClient {
         );
 
         // Check cache first
-        if !force_refresh {
-            if let Some(cached) =
+        if !force_refresh
+            && let Some(cached) =
                 self.cache
                     .get(server_name, &fingerprint, server_config.cache_ttl_seconds)
-            {
-                tracing::debug!("Cache hit for MCP server '{server_name}'");
-                return Ok(cached);
-            }
+        {
+            tracing::debug!("Cache hit for MCP server '{server_name}'");
+            return Ok(cached);
         }
 
         // Fetch from server
@@ -254,39 +253,39 @@ impl McpClient {
                 let line =
                     line.map_err(|e| FerroError::Mcp(format!("Failed to read from server: {e}")))?;
 
-                if let Ok(response) = serde_json::from_str::<Value>(&line) {
-                    if response.get("id") == Some(&json!(2)) {
-                        // This is our tools/list response
-                        if let Some(result) = response.get("result") {
-                            if let Some(tool_arr) = result.get("tools").and_then(|t| t.as_array()) {
-                                for tool_val in tool_arr {
-                                    let name = tool_val
-                                        .get("name")
-                                        .and_then(|n| n.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    let description = tool_val
-                                        .get("description")
-                                        .and_then(|d| d.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    let input_schema = tool_val
-                                        .get("inputSchema")
-                                        .cloned()
-                                        .unwrap_or(json!({"type": "object"}));
+                if let Ok(response) = serde_json::from_str::<Value>(&line)
+                    && response.get("id") == Some(&json!(2))
+                {
+                    // This is our tools/list response
+                    if let Some(result) = response.get("result")
+                        && let Some(tool_arr) = result.get("tools").and_then(|t| t.as_array())
+                    {
+                        for tool_val in tool_arr {
+                            let name = tool_val
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let description = tool_val
+                                .get("description")
+                                .and_then(|d| d.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let input_schema = tool_val
+                                .get("inputSchema")
+                                .cloned()
+                                .unwrap_or(json!({"type": "object"}));
 
-                                    tools.push(ToolDefinition {
-                                        name,
-                                        description,
-                                        input_schema,
-                                        server_name: Some(server_name.to_string()),
-                                    });
-                                }
-                            }
+                            tools.push(ToolDefinition {
+                                name,
+                                description,
+                                input_schema,
+                                server_name: Some(server_name.to_string()),
+                            });
                         }
-                        got_tools = true;
-                        break;
                     }
+                    got_tools = true;
+                    break;
                 }
             }
             Ok::<_, FerroError>(())
@@ -396,29 +395,28 @@ impl McpClient {
             while let Some(line) = lines.next_line().await.transpose() {
                 let line = line.map_err(|e| FerroError::Mcp(format!("Read error: {e}")))?;
 
-                if let Ok(response) = serde_json::from_str::<Value>(&line) {
-                    if response.get("id") == Some(&json!(2)) {
-                        if let Some(result) = response.get("result") {
-                            // Extract text content from content array
-                            if let Some(content) = result.get("content").and_then(|c| c.as_array())
-                            {
-                                let text: String = content
-                                    .iter()
-                                    .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-                                let _ = child.kill().await;
-                                return Ok(text);
-                            }
-                        }
-                        if let Some(error) = response.get("error") {
-                            let msg = error
-                                .get("message")
-                                .and_then(|m| m.as_str())
-                                .unwrap_or("Unknown error");
+                if let Ok(response) = serde_json::from_str::<Value>(&line)
+                    && response.get("id") == Some(&json!(2))
+                {
+                    if let Some(result) = response.get("result") {
+                        // Extract text content from content array
+                        if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
+                            let text: String = content
+                                .iter()
+                                .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
+                                .collect::<Vec<_>>()
+                                .join("\n");
                             let _ = child.kill().await;
-                            return Err(FerroError::Tool(msg.to_string()));
+                            return Ok(text);
                         }
+                    }
+                    if let Some(error) = response.get("error") {
+                        let msg = error
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("Unknown error");
+                        let _ = child.kill().await;
+                        return Err(FerroError::Tool(msg.to_string()));
                     }
                 }
             }

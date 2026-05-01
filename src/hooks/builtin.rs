@@ -132,6 +132,11 @@ impl AuditHook {
         let log = self.log.lock().unwrap();
         log.entries.len()
     }
+
+    /// Returns true if the audit log has no entries.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// A snapshot of an audit log entry.

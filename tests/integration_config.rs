@@ -7,7 +7,7 @@ use ferroclaw::providers;
 fn test_default_config_is_valid() {
     let config = Config::default();
     assert_eq!(config.agent.default_model, "claude-sonnet-4-20250514");
-    assert_eq!(config.agent.max_iterations, 30);
+    assert_eq!(config.agent.max_iterations, 150);
     assert_eq!(config.agent.token_budget, 200_000);
     assert_eq!(config.gateway.bind, "127.0.0.1");
     assert_eq!(config.gateway.port, 8420);

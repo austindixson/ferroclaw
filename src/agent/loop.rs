@@ -19,6 +19,8 @@ use crate::types::{
 };
 use crate::websocket::{WsBroadcaster, WsEvent};
 
+const EXECUTION_POLICY_APPENDIX: &str = "Operational policy:\n- You have real tool access. When a user asks you to perform an action, execute it with tools instead of only describing steps.\n- Do not claim an action is impossible until you actually attempt the relevant tool call(s).\n- If a tool fails (network/TLS/auth/path), report the exact failure and then propose the smallest next workaround.\n- Prefer concrete outputs grounded in tool results over generic advice.\n- If the user asks for parity with Hermes-style behavior, act tool-first and completion-first.";
+
 /// The core agent loop.
 pub struct AgentLoop {
     provider: Box<dyn LlmProvider>,
@@ -115,10 +117,10 @@ impl AgentLoop {
 
     /// Broadcast a WebSocket event if broadcaster is configured.
     fn broadcast_event(&self, event: WsEvent) {
-        if let Some(broadcaster) = &self.ws_broadcaster {
-            if let Err(e) = broadcaster.broadcast(event) {
-                tracing::warn!("Failed to broadcast WebSocket event: {}", e);
-            }
+        if let Some(broadcaster) = &self.ws_broadcaster
+            && let Err(e) = broadcaster.broadcast(event)
+        {
+            tracing::warn!("Failed to broadcast WebSocket event: {}", e);
         }
     }
 
@@ -148,6 +150,10 @@ impl AgentLoop {
     where
         F: FnMut(&AgentEvent),
     {
+        // Per-turn accounting: reset usage before each run so token budget checks and
+        // UI status represent the current run, not cumulative prior turns.
+        self.context.tokens_used = 0;
+
         let started = std::time::Instant::now();
         let mut tool_calls_total: u32 = 0;
         let mut tool_batches: u32 = 0;
@@ -169,7 +175,10 @@ impl AgentLoop {
             .collect();
 
         let diet_context = build_diet_context(&self.skill_summaries, &builtin_defs);
-        let system_prompt = format!("{}\n\n{}", self.config.agent.system_prompt, diet_context);
+        let system_prompt = format!(
+            "{}\n\n{}\n\n{}",
+            self.config.agent.system_prompt, EXECUTION_POLICY_APPENDIX, diet_context
+        );
 
         // Ensure system message is first
         if history.is_empty() || history[0].role != crate::types::Role::System {
@@ -183,16 +192,16 @@ impl AgentLoop {
 
         // Invariant I1: provider input must contain at least one user message.
         if !history.iter().any(|m| m.role == Role::User) {
-            return Ok(make_run_outcome(
-                "Stopped: invariant violated (missing user message).".to_string(),
-                RunStopReason::ErrorNonRetryable,
-                0,
+            return Ok(make_run_outcome(RunOutcomeParams {
+                text: "Stopped: invariant violated (missing user message).".to_string(),
+                reason: RunStopReason::ErrorNonRetryable,
+                iterations: 0,
                 tool_calls_total,
-                started.elapsed().as_millis() as u64,
-                last_input_tokens,
-                last_output_tokens,
-                Some("loop invariant I1 violated: no user message".to_string()),
-            ));
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                input_tokens: last_input_tokens,
+                output_tokens: last_output_tokens,
+                notes: Some("loop invariant I1 violated: no user message".to_string()),
+            }));
         }
 
         // Get all tool definitions for provider, plus a built-in-only fallback set
@@ -209,8 +218,24 @@ impl AgentLoop {
         let max_iterations = self.config.agent.max_iterations;
         let max_tool_calls_per_iteration = self.config.agent.max_tool_calls_per_iteration;
         let max_tool_calls_total = self.config.agent.max_tool_calls_total;
+        let wall_clock_budget_ms = effective_wall_clock_budget_ms(&self.config, user_message);
 
         loop {
+            if let Some(outcome) = stop_for_wall_clock_budget(
+                started,
+                wall_clock_budget_ms,
+                iteration,
+                tool_calls_total,
+                last_input_tokens,
+                last_output_tokens,
+            ) {
+                self.broadcast_event(WsEvent::agent_state(
+                    self.agent_id.clone(),
+                    crate::websocket::AgentState::Error,
+                ));
+                return Ok(outcome);
+            }
+
             iteration += 1;
             if iteration > max_iterations {
                 // Broadcast error state
@@ -218,16 +243,16 @@ impl AgentLoop {
                     self.agent_id.clone(),
                     crate::websocket::AgentState::Error,
                 ));
-                return Ok(make_run_outcome(
-                    "Stopped: max iterations reached.".to_string(),
-                    RunStopReason::BudgetIterations,
-                    max_iterations,
+                return Ok(make_run_outcome(RunOutcomeParams {
+                    text: "Stopped: max iterations reached.".to_string(),
+                    reason: RunStopReason::BudgetIterations,
+                    iterations: max_iterations,
                     tool_calls_total,
-                    started.elapsed().as_millis() as u64,
-                    last_input_tokens,
-                    last_output_tokens,
-                    None,
-                ));
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                    input_tokens: last_input_tokens,
+                    output_tokens: last_output_tokens,
+                    notes: None,
+                }));
             }
 
             // Check token budget
@@ -237,19 +262,19 @@ impl AgentLoop {
                     self.agent_id.clone(),
                     crate::websocket::AgentState::Error,
                 ));
-                return Ok(make_run_outcome(
-                    "Stopped: token budget exhausted.".to_string(),
-                    RunStopReason::BudgetTokens,
-                    iteration,
+                return Ok(make_run_outcome(RunOutcomeParams {
+                    text: "Stopped: token budget exhausted.".to_string(),
+                    reason: RunStopReason::BudgetTokens,
+                    iterations: iteration,
                     tool_calls_total,
-                    started.elapsed().as_millis() as u64,
-                    last_input_tokens,
-                    last_output_tokens,
-                    Some(format!(
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                    input_tokens: last_input_tokens,
+                    output_tokens: last_output_tokens,
+                    notes: Some(format!(
                         "used={} limit={}",
                         self.context.tokens_used, self.context.token_budget
                     )),
-                ));
+                }));
             }
 
             // Prune context if needed
@@ -261,7 +286,12 @@ impl AgentLoop {
             // Call LLM with fallback chain.
             // If we hit provider context overflow, retry once with a reduced toolset
             // (built-ins only, then no tools) and a smaller completion cap.
-            let max_tokens = resolve_provider_max_tokens(&self.config, &self.config.agent.default_model);
+            let max_tokens = effective_max_tokens(
+                &self.config,
+                &self.config.agent.default_model,
+                started,
+                wall_clock_budget_ms,
+            );
 
             let response = match self
                 .call_with_fallback(history, &all_tools, max_tokens, &mut on_event)
@@ -347,6 +377,21 @@ impl AgentLoop {
             }
 
             // Check for tool calls
+            if let Some(outcome) = stop_for_wall_clock_budget(
+                started,
+                wall_clock_budget_ms,
+                iteration,
+                tool_calls_total,
+                last_input_tokens,
+                last_output_tokens,
+            ) {
+                self.broadcast_event(WsEvent::agent_state(
+                    self.agent_id.clone(),
+                    crate::websocket::AgentState::Error,
+                ));
+                return Ok(outcome);
+            }
+
             let tool_calls = response.message.tool_calls.clone();
             history.push(response.message);
 
@@ -369,23 +414,27 @@ impl AgentLoop {
                     let (reason, final_text, note) = if text.trim().is_empty() && tool_batches > 0 {
                         (
                             RunStopReason::ErrorEmptyFinalAfterTools,
-                            "Stopped: assistant returned empty final text after tool execution.".to_string(),
-                            Some("loop invariant I4 violated: empty final text after tool batch".to_string()),
+                            "Stopped: assistant returned empty final text after tool execution."
+                                .to_string(),
+                            Some(
+                                "loop invariant I4 violated: empty final text after tool batch"
+                                    .to_string(),
+                            ),
                         )
                     } else {
                         (RunStopReason::AssistantFinal, text, None)
                     };
 
-                    return Ok(make_run_outcome(
-                        final_text,
+                    return Ok(make_run_outcome(RunOutcomeParams {
+                        text: final_text,
                         reason,
-                        iteration,
+                        iterations: iteration,
                         tool_calls_total,
-                        started.elapsed().as_millis() as u64,
-                        last_input_tokens,
-                        last_output_tokens,
-                        note,
-                    ));
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                        input_tokens: last_input_tokens,
+                        output_tokens: last_output_tokens,
+                        notes: note,
+                    }));
                 }
 
                 if let Some((reason, note)) = check_tool_call_caps(
@@ -398,16 +447,16 @@ impl AgentLoop {
                         self.agent_id.clone(),
                         crate::websocket::AgentState::Error,
                     ));
-                    return Ok(make_run_outcome(
-                        "Stopped: tool call budget exceeded.".to_string(),
+                    return Ok(make_run_outcome(RunOutcomeParams {
+                        text: "Stopped: tool call budget exceeded.".to_string(),
                         reason,
-                        iteration,
+                        iterations: iteration,
                         tool_calls_total,
-                        started.elapsed().as_millis() as u64,
-                        last_input_tokens,
-                        last_output_tokens,
-                        Some(note),
-                    ));
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                        input_tokens: last_input_tokens,
+                        output_tokens: last_output_tokens,
+                        notes: Some(note),
+                    }));
                 }
 
                 let names: Vec<String> = tool_calls.iter().map(|tc| tc.name.clone()).collect();
@@ -484,19 +533,19 @@ impl AgentLoop {
 
                 // Invariant I2: every emitted tool call must produce a result/error event.
                 if emitted_results != expected_results {
-                    return Ok(make_run_outcome(
-                        "Stopped: tool lifecycle invariant violation.".to_string(),
-                        RunStopReason::ErrorNonRetryable,
-                        iteration,
+                    return Ok(make_run_outcome(RunOutcomeParams {
+                        text: "Stopped: tool lifecycle invariant violation.".to_string(),
+                        reason: RunStopReason::ErrorNonRetryable,
+                        iterations: iteration,
                         tool_calls_total,
-                        started.elapsed().as_millis() as u64,
-                        last_input_tokens,
-                        last_output_tokens,
-                        Some(format!(
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                        input_tokens: last_input_tokens,
+                        output_tokens: last_output_tokens,
+                        notes: Some(format!(
                             "loop invariant I2 violated: expected {} results, got {}",
                             expected_results, emitted_results
                         )),
-                    ));
+                    }));
                 }
             } else {
                 // No tool calls — text response
@@ -516,23 +565,27 @@ impl AgentLoop {
                 let (reason, final_text, note) = if text.trim().is_empty() && tool_batches > 0 {
                     (
                         RunStopReason::ErrorEmptyFinalAfterTools,
-                        "Stopped: assistant returned empty final text after tool execution.".to_string(),
-                        Some("loop invariant I4 violated: empty final text after tool batch".to_string()),
+                        "Stopped: assistant returned empty final text after tool execution."
+                            .to_string(),
+                        Some(
+                            "loop invariant I4 violated: empty final text after tool batch"
+                                .to_string(),
+                        ),
                     )
                 } else {
                     (RunStopReason::AssistantFinal, text, None)
                 };
 
-                return Ok(make_run_outcome(
-                    final_text,
+                return Ok(make_run_outcome(RunOutcomeParams {
+                    text: final_text,
                     reason,
-                    iteration,
+                    iterations: iteration,
                     tool_calls_total,
-                    started.elapsed().as_millis() as u64,
-                    last_input_tokens,
-                    last_output_tokens,
-                    note,
-                ));
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                    input_tokens: last_input_tokens,
+                    output_tokens: last_output_tokens,
+                    notes: note,
+                }));
             }
         }
     }
@@ -604,18 +657,17 @@ impl AgentLoop {
 
     async fn execute_tool_call(&self, tc: &ToolCall) -> Result<crate::types::ToolResult> {
         // Check if this is an MCP tool
-        if let Some(meta) = self.registry.get_meta(&tc.name) {
-            if let ToolSource::Mcp { server } = &meta.source {
-                // Route through MCP client
-                if let Some(mcp) = &self.mcp_client {
-                    let diet_response = mcp.execute_tool(server, &tc.name, &tc.arguments).await?;
-                    return Ok(crate::types::ToolResult {
-                        call_id: tc.id.clone(),
-                        content: diet_response.content,
-                        is_error: false,
-                    });
-                }
-            }
+        if let Some(meta) = self.registry.get_meta(&tc.name)
+            && let ToolSource::Mcp { server } = &meta.source
+            && let Some(mcp) = &self.mcp_client
+        {
+            // Route through MCP client
+            let diet_response = mcp.execute_tool(server, &tc.name, &tc.arguments).await?;
+            return Ok(crate::types::ToolResult {
+                call_id: tc.id.clone(),
+                content: diet_response.content,
+                is_error: false,
+            });
         }
 
         // Execute through registry (built-in tools)
@@ -670,7 +722,7 @@ fn check_tool_call_caps(
     None
 }
 
-fn make_run_outcome(
+struct RunOutcomeParams {
     text: String,
     reason: RunStopReason,
     iterations: u32,
@@ -679,7 +731,20 @@ fn make_run_outcome(
     input_tokens: u64,
     output_tokens: u64,
     notes: Option<String>,
-) -> RunOutcome {
+}
+
+fn make_run_outcome(params: RunOutcomeParams) -> RunOutcome {
+    let RunOutcomeParams {
+        text,
+        reason,
+        iterations,
+        tool_calls_total,
+        elapsed_ms,
+        input_tokens,
+        output_tokens,
+        notes,
+    } = params;
+
     RunOutcome {
         text,
         stop: RunStopContract {
@@ -724,19 +789,109 @@ fn outcome_from_error(
     output_tokens: u64,
 ) -> RunOutcome {
     let reason = classify_stop_reason_from_error(&err);
-    make_run_outcome(
-        format!("Stopped: {err}"),
+    make_run_outcome(RunOutcomeParams {
+        text: format!("Stopped: {err}"),
         reason,
-        iteration,
+        iterations: iteration,
         tool_calls_total,
         elapsed_ms,
         input_tokens,
         output_tokens,
-        Some(err.to_string()),
-    )
+        notes: Some(err.to_string()),
+    })
 }
 
 fn resolve_provider_max_tokens(config: &Config, model: &str) -> u32 {
+    let model_l = model.to_ascii_lowercase();
+    let bare_codex_model = !model_l.contains('/')
+        && (model_l.starts_with("codex-")
+            || model_l.contains("-codex")
+            || model_l.starts_with("gpt-5."));
+
+    if model_l.starts_with("openaicodex:") || model_l.starts_with("codex-") || bare_codex_model {
+        return config
+            .providers
+            .openai_codex
+            .as_ref()
+            .map(|o| o.max_tokens)
+            .unwrap_or(8192);
+    }
+    if model_l.starts_with("google:") || model_l.starts_with("gemini-") {
+        return config
+            .providers
+            .google
+            .as_ref()
+            .map(|o| o.max_tokens)
+            .unwrap_or(8192);
+    }
+    if model_l.starts_with("xai:") || model_l.starts_with("grok-") {
+        return config
+            .providers
+            .xai
+            .as_ref()
+            .map(|o| o.max_tokens)
+            .unwrap_or(8192);
+    }
+    if model_l.starts_with("nvidia:")
+        || model_l.starts_with("z-ai/")
+        || model_l.starts_with("nvidia/")
+    {
+        return config
+            .providers
+            .nvidia
+            .as_ref()
+            .map(|o| o.max_tokens)
+            .unwrap_or(8192);
+    }
+    if model_l.starts_with("llamacpp:") {
+        return config
+            .providers
+            .llamacpp
+            .as_ref()
+            .map(|o| o.max_tokens)
+            .unwrap_or(8192);
+    }
+    if model_l.starts_with("mistral:") || model_l.starts_with("mistral-") {
+        return config
+            .providers
+            .mistral
+            .as_ref()
+            .map(|o| o.max_tokens)
+            .unwrap_or(8192);
+    }
+    if model_l.starts_with("azure:") || model_l.starts_with("azure-openai:") {
+        return config
+            .providers
+            .azure_openai
+            .as_ref()
+            .map(|o| o.max_tokens)
+            .unwrap_or(8192);
+    }
+    if model_l.starts_with("copilot:") || model_l.starts_with("githubcopilot:") {
+        return config
+            .providers
+            .github_copilot
+            .as_ref()
+            .map(|o| o.max_tokens)
+            .unwrap_or(8192);
+    }
+    if model_l.starts_with("vertex:") || model_l.starts_with("googlevertex:") {
+        return config
+            .providers
+            .google_vertex
+            .as_ref()
+            .map(|o| o.max_tokens)
+            .unwrap_or(8192);
+    }
+    if model_l.starts_with("bedrock:") {
+        return config
+            .providers
+            .bedrock
+            .as_ref()
+            .map(|o| o.max_tokens)
+            .unwrap_or(8192);
+    }
+
     if model.contains('/') {
         return config
             .providers
@@ -756,15 +911,117 @@ fn resolve_provider_max_tokens(config: &Config, model: &str) -> u32 {
     }
 
     if model.starts_with("glm-") {
-        return 8192;
+        return config
+            .providers
+            .zai
+            .as_ref()
+            .map(|z| z.max_tokens)
+            .unwrap_or(8192);
     }
 
-    config
-        .providers
-        .openai
-        .as_ref()
-        .map(|o| o.max_tokens)
-        .unwrap_or(8192)
+    if let Some(o) = config.providers.openai.as_ref() {
+        return o.max_tokens;
+    }
+    if let Some(o) = config.providers.openai_codex.as_ref() {
+        return o.max_tokens;
+    }
+    8192
+}
+
+fn effective_wall_clock_budget_ms(config: &Config, user_message: &str) -> Option<u64> {
+    let configured = if config.agent.max_wall_clock_ms > 0 {
+        Some(config.agent.max_wall_clock_ms)
+    } else {
+        None
+    };
+
+    let strict_detected = if config.agent.deadline_aware_completion {
+        parse_prompt_wall_clock_budget_ms(user_message)
+    } else {
+        None
+    };
+
+    match (configured, strict_detected) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+fn parse_prompt_wall_clock_budget_ms(user_message: &str) -> Option<u64> {
+    let lower = user_message.to_ascii_lowercase();
+    if let Some(idx) = lower.find("max_ms=") {
+        let digits: String = lower[idx + 7..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(v) = digits.parse::<u64>()
+            && v > 0
+        {
+            return Some(v);
+        }
+    }
+
+    if lower.contains("strict wall-clock") || lower.contains("strict wall clock") {
+        return Some(5_000);
+    }
+
+    None
+}
+
+fn effective_max_tokens(
+    config: &Config,
+    model: &str,
+    started: std::time::Instant,
+    wall_clock_budget_ms: Option<u64>,
+) -> u32 {
+    let base = resolve_provider_max_tokens(config, model);
+    if !config.agent.deadline_aware_completion {
+        return base;
+    }
+
+    let Some(deadline_ms) = wall_clock_budget_ms else {
+        return base;
+    };
+
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    if elapsed_ms >= deadline_ms {
+        return config.agent.deadline_tight_max_tokens.min(base);
+    }
+
+    let remaining_ms = deadline_ms.saturating_sub(elapsed_ms);
+    if remaining_ms <= config.agent.deadline_tight_ms {
+        return config.agent.deadline_tight_max_tokens.min(base);
+    }
+
+    base
+}
+
+fn stop_for_wall_clock_budget(
+    started: std::time::Instant,
+    wall_clock_budget_ms: Option<u64>,
+    iteration: u32,
+    tool_calls_total: u32,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Option<RunOutcome> {
+    let limit = wall_clock_budget_ms?;
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    if elapsed_ms < limit {
+        return None;
+    }
+
+    Some(make_run_outcome(RunOutcomeParams {
+        text: "Stopped: wall-clock budget exhausted.".to_string(),
+        reason: RunStopReason::BudgetWallClock,
+        iterations: iteration,
+        tool_calls_total,
+        elapsed_ms,
+        input_tokens,
+        output_tokens,
+        notes: Some(format!("elapsed_ms={} limit_ms={}", elapsed_ms, limit)),
+    }))
 }
 
 fn is_context_overflow_error(err: &FerroError) -> bool {
@@ -778,7 +1035,6 @@ fn is_context_overflow_error(err: &FerroError) -> bool {
         || m.contains("requested") && m.contains("max")
         || m.contains("too long")
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -806,26 +1062,39 @@ mod tests {
 
     #[test]
     fn test_resolve_provider_max_tokens_for_openrouter_model() {
-        let mut cfg = Config::default();
-        cfg.providers = ProvidersConfig {
-            anthropic: Some(AnthropicConfig {
-                api_key_env: "ANTHROPIC_API_KEY".into(),
-                base_url: "https://api.anthropic.com".into(),
-                max_tokens: 1111,
-            }),
-            openai: Some(OpenAiConfig {
-                api_key_env: "OPENAI_API_KEY".into(),
-                base_url: "https://api.openai.com/v1".into(),
-                max_tokens: 2222,
-            }),
-            zai: None,
-            openrouter: Some(OpenRouterConfig {
-                api_key_env: "OPENROUTER_API_KEY".into(),
-                base_url: "https://openrouter.ai/api/v1".into(),
-                site_url: None,
-                site_name: None,
-                max_tokens: 3333,
-            }),
+        let cfg = Config {
+            providers: ProvidersConfig {
+                anthropic: Some(AnthropicConfig {
+                    api_key_env: "ANTHROPIC_API_KEY".into(),
+                    base_url: "https://api.anthropic.com".into(),
+                    max_tokens: 1111,
+                    request_timeout_ms: 15_000,
+                    max_retries: 2,
+                    no_retry_max_tokens_threshold: 128,
+                }),
+                openai: Some(OpenAiConfig {
+                    api_key_env: "OPENAI_API_KEY".into(),
+                    base_url: "https://api.openai.com/v1".into(),
+                    auth_mode: "api_key".into(),
+                    oauth_token_env: "OPENAI_OAUTH_TOKEN".into(),
+                    max_tokens: 2222,
+                    request_timeout_ms: 15_000,
+                    max_retries: 2,
+                    no_retry_max_tokens_threshold: 128,
+                }),
+                openrouter: Some(OpenRouterConfig {
+                    api_key_env: "OPENROUTER_API_KEY".into(),
+                    base_url: "https://openrouter.ai/api/v1".into(),
+                    site_url: None,
+                    site_name: None,
+                    max_tokens: 3333,
+                    request_timeout_ms: 15_000,
+                    max_retries: 2,
+                    no_retry_max_tokens_threshold: 128,
+                }),
+                ..ProvidersConfig::default()
+            },
+            ..Config::default()
         };
 
         assert_eq!(
@@ -856,16 +1125,16 @@ mod tests {
 
     #[test]
     fn test_make_run_outcome_preserves_stop_contract_fields() {
-        let out = make_run_outcome(
-            "final".to_string(),
-            RunStopReason::AssistantFinal,
-            3,
-            5,
-            1200,
-            100,
-            40,
-            Some("ok".to_string()),
-        );
+        let out = make_run_outcome(RunOutcomeParams {
+            text: "final".to_string(),
+            reason: RunStopReason::AssistantFinal,
+            iterations: 3,
+            tool_calls_total: 5,
+            elapsed_ms: 1200,
+            input_tokens: 100,
+            output_tokens: 40,
+            notes: Some("ok".to_string()),
+        });
 
         assert_eq!(out.text, "final");
         assert_eq!(out.stop.reason, RunStopReason::AssistantFinal);
@@ -880,7 +1149,8 @@ mod tests {
 
     #[test]
     fn test_tool_cap_checks_emit_expected_reasons() {
-        let iteration_cap = check_tool_call_caps(9, 0, 8, 64).expect("should stop on per-iteration cap");
+        let iteration_cap =
+            check_tool_call_caps(9, 0, 8, 64).expect("should stop on per-iteration cap");
         assert_eq!(iteration_cap.0, RunStopReason::BudgetToolsIteration);
 
         let total_cap = check_tool_call_caps(3, 63, 8, 64).expect("should stop on total cap");
@@ -912,7 +1182,8 @@ mod tests {
             match case.kind.as_str() {
                 "tool_cap" => {
                     let result = check_tool_call_caps(
-                        case.requested_in_iteration.expect("requested_in_iteration missing"),
+                        case.requested_in_iteration
+                            .expect("requested_in_iteration missing"),
                         case.tool_calls_total_so_far
                             .expect("tool_calls_total_so_far missing"),
                         case.max_tool_calls_per_iteration

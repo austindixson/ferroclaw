@@ -120,25 +120,25 @@ async fn generate_rust_tests(content: &str, test_type: &str) -> Result<String, F
 
     if test_type == "unit" || test_type == "both" {
         for func in &functions {
-            output.push_str(&format!("    #[test]\n"));
+            output.push_str("    #[test]\n");
             output.push_str(&format!("    fn test_{}() {{\n", func));
             output.push_str(&format!("        // TODO: Implement test for {}\n", func));
-            output.push_str(&format!("        assert!(true); // Placeholder\n"));
-            output.push_str(&format!("    }}\n\n"));
+            output.push_str("        assert!(true); // Placeholder\n");
+            output.push_str("    }}\n\n");
         }
     }
 
     if test_type == "integration" || test_type == "both" {
         output.push_str("    // Integration tests\n");
         for func in &functions {
-            output.push_str(&format!("    #[test]\n"));
+            output.push_str("    #[test]\n");
             output.push_str(&format!("    fn integration_test_{}() {{\n", func));
             output.push_str(&format!(
                 "        // TODO: Implement integration test for {}\n",
                 func
             ));
-            output.push_str(&format!("        assert!(true); // Placeholder\n"));
-            output.push_str(&format!("    }}\n\n"));
+            output.push_str("        assert!(true); // Placeholder\n");
+            output.push_str("    }}\n\n");
         }
     }
 
@@ -180,7 +180,7 @@ async fn generate_python_tests(content: &str, test_type: &str) -> Result<String,
         }
     }
 
-    output.push_str("\n");
+    output.push('\n');
 
     if test_type == "unit" || test_type == "both" {
         for func in &functions {
@@ -190,21 +190,21 @@ async fn generate_python_tests(content: &str, test_type: &str) -> Result<String,
             ));
             output.push_str(&format!("    def test_{}(self):\n", func));
             output.push_str(&format!("        # TODO: Implement test for {}\n", func));
-            output.push_str(&format!("        self.assertTrue(True) # Placeholder\n\n"));
+            output.push_str("        self.assertTrue(True) # Placeholder\n\n");
         }
 
         for cls in &classes {
             output.push_str(&format!("class Test{}(unittest.TestCase):\n", cls));
-            output.push_str(&format!("    def setUp(self):\n"));
+            output.push_str("    def setUp(self):\n");
             output.push_str(&format!("        # TODO: Setup for {} instance\n", cls));
-            output.push_str(&format!("        pass\n\n"));
+            output.push_str("        pass\n\n");
 
             output.push_str(&format!(
                 "    def test_{}_basic(self):\n",
                 to_snake_case(cls)
             ));
             output.push_str(&format!("        # TODO: Basic test for {}\n", cls));
-            output.push_str(&format!("        self.assertTrue(True) # Placeholder\n\n"));
+            output.push_str("        self.assertTrue(True) # Placeholder\n\n");
         }
     }
 
@@ -220,11 +220,11 @@ async fn generate_python_tests(content: &str, test_type: &str) -> Result<String,
                 "        # TODO: Implement integration test for {}\n",
                 func
             ));
-            output.push_str(&format!("        self.assertTrue(True) # Placeholder\n\n"));
+            output.push_str("        self.assertTrue(True) # Placeholder\n\n");
         }
     }
 
-    output.push_str("\n");
+    output.push('\n');
     output.push_str("if __name__ == '__main__':\n");
     output.push_str("    unittest.main()\n");
 
@@ -287,14 +287,14 @@ async fn generate_javascript_tests(content: &str, test_type: &str) -> Result<Str
             if use_jest {
                 output.push_str(&format!("  test('{}', () => {{\n", func));
                 output.push_str(&format!("    // TODO: Implement test for {}\n", func));
-                output.push_str(&format!("    expect(true).toBe(true); // Placeholder\n"));
-                output.push_str(&format!("  }});\n\n"));
+                output.push_str("    expect(true).toBe(true); // Placeholder\n");
+                output.push_str("  }});\n\n");
             } else {
                 output.push_str(&format!("// test for {}\n", func));
                 output.push_str(&format!("function test_{}() {{\n", func));
                 output.push_str(&format!("  // TODO: Implement test for {}\n", func));
-                output.push_str(&format!("  assert(true, 'Placeholder');\n"));
-                output.push_str(&format!("}}\n\n"));
+                output.push_str("  assert(true, 'Placeholder');\n");
+                output.push_str("}}\n\n");
             }
         }
     }
@@ -307,8 +307,8 @@ async fn generate_javascript_tests(content: &str, test_type: &str) -> Result<Str
                     "    // TODO: Implement integration test for {}\n",
                     func
                 ));
-                output.push_str(&format!("    expect(true).toBe(true); // Placeholder\n"));
-                output.push_str(&format!("  }});\n\n"));
+                output.push_str("    expect(true).toBe(true); // Placeholder\n");
+                output.push_str("  }});\n\n");
             } else {
                 output.push_str(&format!("// integration test for {}\n", func));
                 output.push_str(&format!("function test_{}_integration() {{\n", func));
@@ -316,8 +316,8 @@ async fn generate_javascript_tests(content: &str, test_type: &str) -> Result<Str
                     "  // TODO: Implement integration test for {}\n",
                     func
                 ));
-                output.push_str(&format!("  assert(true, 'Placeholder');\n"));
-                output.push_str(&format!("}}\n\n"));
+                output.push_str("  assert(true, 'Placeholder');\n");
+                output.push_str("}}\n\n");
             }
         }
     }

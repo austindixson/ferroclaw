@@ -9,7 +9,7 @@
 //! The system uses TaskSystem for persistent storage and dependency tracking.
 
 use crate::error::{FerroError, Result};
-use crate::tasks::{Task, TaskStatus, TaskStore};
+use crate::tasks::{Task, TaskCreate, TaskStatus, TaskStore};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -35,16 +35,6 @@ impl PlanPhase {
             Self::Planning => "planning",
             Self::Implementation => "implementation",
             Self::Verification => "verification",
-        }
-    }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "research" => Some(Self::Research),
-            "planning" => Some(Self::Planning),
-            "implementation" => Some(Self::Implementation),
-            "verification" => Some(Self::Verification),
-            _ => None,
         }
     }
 
@@ -92,6 +82,17 @@ pub struct PlanStep {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CreateStepInput {
+    pub subject: String,
+    pub description: String,
+    pub active_form: Option<String>,
+    pub acceptance_criteria: Vec<String>,
+    pub depends_on: Vec<String>,
+    pub requires_approval: bool,
+    pub metadata: HashMap<String, serde_json::Value>,
+}
+
 /// Status of a plan step
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -121,16 +122,34 @@ impl PlanStepStatus {
             Self::Failed => "failed",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for PlanPhase {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
-            "pending" => Some(Self::Pending),
-            "in_progress" => Some(Self::InProgress),
-            "completed" => Some(Self::Completed),
-            "blocked" => Some(Self::Blocked),
-            "awaiting_approval" => Some(Self::AwaitingApproval),
-            "failed" => Some(Self::Failed),
-            _ => None,
+            "research" => Ok(Self::Research),
+            "planning" => Ok(Self::Planning),
+            "implementation" => Ok(Self::Implementation),
+            "verification" => Ok(Self::Verification),
+            _ => Err("invalid plan phase"),
+        }
+    }
+}
+
+impl std::str::FromStr for PlanStepStatus {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "in_progress" => Ok(Self::InProgress),
+            "completed" => Ok(Self::Completed),
+            "blocked" => Ok(Self::Blocked),
+            "awaiting_approval" => Ok(Self::AwaitingApproval),
+            "failed" => Ok(Self::Failed),
+            _ => Err("invalid plan step status"),
         }
     }
 }
@@ -257,13 +276,13 @@ impl PlanMode {
     /// Transition to the next phase (requires approval if gate exists)
     pub fn transition_phase(&mut self, _notes: Option<String>) -> Result<PlanPhase> {
         // Check if current phase requires approval to exit
-        if let Some(gate) = self.approval_gates.get(&self.phase) {
-            if !gate.approved {
-                return Err(FerroError::Memory(format!(
-                    "Cannot transition from {}: approval required. Use approve_phase() first.",
-                    self.phase.as_str()
-                )));
-            }
+        if let Some(gate) = self.approval_gates.get(&self.phase)
+            && !gate.approved
+        {
+            return Err(FerroError::Memory(format!(
+                "Cannot transition from {}: approval required. Use approve_phase() first.",
+                self.phase.as_str()
+            )));
         }
 
         let next = self.phase.next().ok_or_else(|| {
@@ -303,16 +322,17 @@ impl PlanMode {
     }
 
     /// Create a new plan step
-    pub fn create_step(
-        &mut self,
-        subject: &str,
-        description: &str,
-        active_form: Option<String>,
-        acceptance_criteria: Vec<String>,
-        depends_on: Vec<String>,
-        requires_approval: bool,
-        metadata: HashMap<String, serde_json::Value>,
-    ) -> Result<PlanStep> {
+    pub fn create_step(&mut self, input: CreateStepInput) -> Result<PlanStep> {
+        let CreateStepInput {
+            subject,
+            description,
+            active_form,
+            acceptance_criteria,
+            depends_on,
+            requires_approval,
+            metadata,
+        } = input;
+
         // Validate dependencies exist
         for dep_id in &depends_on {
             if self.store.get(dep_id)?.is_none() {
@@ -333,15 +353,15 @@ impl PlanMode {
             serde_json::json!(acceptance_criteria),
         );
 
-        let task = self.store.create(
-            subject,
-            description,
-            active_form.clone(),
-            None,
-            vec![],             // blocks (empty initially, will be set up below)
-            depends_on.clone(), // blocked_by (dependencies)
-            task_metadata,
-        )?;
+        let task = self.store.create(TaskCreate {
+            subject: subject.clone(),
+            description: description.clone(),
+            active_form: active_form.clone(),
+            owner: None,
+            blocks: vec![],
+            blocked_by: depends_on.clone(),
+            metadata: task_metadata,
+        })?;
 
         // Set up bidirectional dependency relationships
         // For each dependency, add this task to the dependency's blocks list
@@ -566,11 +586,11 @@ impl PlanMode {
         let task_status = TaskStatus::from(status);
         let updated_task = self.store.set_status(id, task_status)?;
 
-        if updated_task.is_some() {
+        if let Some(updated_task) = updated_task {
             // Update cache
             if let Some(mut step) = self.get_step(id)? {
                 step.status = status;
-                step.updated_at = updated_task.as_ref().unwrap().updated_at.clone();
+                step.updated_at = updated_task.updated_at.clone();
                 self.steps_cache.insert(id.to_string(), step.clone());
 
                 // Update dependent steps
@@ -637,8 +657,13 @@ impl PlanMode {
             // Update in store - persist approval_granted in metadata
             let mut metadata = step.metadata.clone();
             metadata.insert("approval_granted".to_string(), serde_json::json!(true));
-            self.store
-                .update(id, None, None, None, None, None, None, None, Some(metadata))?;
+            self.store.update(
+                id,
+                crate::tasks::TaskUpdate {
+                    metadata: Some(metadata),
+                    ..Default::default()
+                },
+            )?;
 
             // Update in store
             self.store.set_status(id, TaskStatus::Pending)?;
@@ -907,15 +932,7 @@ mod tests {
         let mut plan = create_test_plan().unwrap();
 
         let step = plan
-            .create_step(
-                "Test step",
-                "Description",
-                Some("Testing".into()),
-                vec!["Criterion 1".into(), "Criterion 2".into()],
-                vec![],
-                false,
-                HashMap::new(),
-            )
+            .create_step(CreateStepInput { subject: "Test step".to_string(), description: "Description".to_string(), active_form: Some("Testing".into()), acceptance_criteria: vec!["Criterion 1".into(), "Criterion 2".into()], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
             .unwrap();
 
         assert_eq!(step.subject, "Test step");
@@ -930,15 +947,7 @@ mod tests {
 
         // Create independent step
         let step1 = plan
-            .create_step(
-                "Step 1",
-                "First step",
-                None,
-                vec![],
-                vec![],
-                false,
-                HashMap::new(),
-            )
+            .create_step(CreateStepInput { subject: "Step 1".to_string(), description: "First step".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
             .unwrap();
 
         assert_eq!(step1.wave, 0);
@@ -946,15 +955,7 @@ mod tests {
 
         // Create dependent step
         let step2 = plan
-            .create_step(
-                "Step 2",
-                "Second step",
-                None,
-                vec![],
-                vec![step1.id.clone()],
-                false,
-                HashMap::new(),
-            )
+            .create_step(CreateStepInput { subject: "Step 2".to_string(), description: "Second step".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![step1.id.clone()], requires_approval: false, metadata: HashMap::new() })
             .unwrap();
 
         assert_eq!(step2.wave, 1); // Wave 1 because depends on step1 (wave 0)
@@ -967,39 +968,15 @@ mod tests {
 
         // Create chain: step1 -> step2 -> step3
         let step1 = plan
-            .create_step(
-                "Step 1",
-                "First",
-                None,
-                vec![],
-                vec![],
-                false,
-                HashMap::new(),
-            )
+            .create_step(CreateStepInput { subject: "Step 1".to_string(), description: "First".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
             .unwrap();
 
         let step2 = plan
-            .create_step(
-                "Step 2",
-                "Second",
-                None,
-                vec![],
-                vec![step1.id.clone()],
-                false,
-                HashMap::new(),
-            )
+            .create_step(CreateStepInput { subject: "Step 2".to_string(), description: "Second".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![step1.id.clone()], requires_approval: false, metadata: HashMap::new() })
             .unwrap();
 
         let step3 = plan
-            .create_step(
-                "Step 3",
-                "Third",
-                None,
-                vec![],
-                vec![step2.id.clone()],
-                false,
-                HashMap::new(),
-            )
+            .create_step(CreateStepInput { subject: "Step 3".to_string(), description: "Third".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![step2.id.clone()], requires_approval: false, metadata: HashMap::new() })
             .unwrap();
 
         assert_eq!(step1.wave, 0);
@@ -1018,15 +995,7 @@ mod tests {
         let mut plan = create_test_plan().unwrap();
 
         let step = plan
-            .create_step(
-                "Sensitive step",
-                "Requires approval",
-                None,
-                vec![],
-                vec![],
-                true, // requires_approval
-                HashMap::new(),
-            )
+            .create_step(CreateStepInput { subject: "Sensitive step".to_string(), description: "Requires approval".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: true, metadata: HashMap::new() })
             .unwrap();
 
         assert_eq!(step.status, PlanStepStatus::AwaitingApproval);
@@ -1044,15 +1013,7 @@ mod tests {
         let mut plan = create_test_plan().unwrap();
 
         let step = plan
-            .create_step(
-                "Test step",
-                "Description",
-                None,
-                vec![],
-                vec![],
-                false,
-                HashMap::new(),
-            )
+            .create_step(CreateStepInput { subject: "Test step".to_string(), description: "Description".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
             .unwrap();
 
         // Start working on step
@@ -1075,27 +1036,11 @@ mod tests {
         let mut plan = create_test_plan().unwrap();
 
         let step1 = plan
-            .create_step(
-                "Step 1",
-                "First",
-                None,
-                vec![],
-                vec![],
-                false,
-                HashMap::new(),
-            )
+            .create_step(CreateStepInput { subject: "Step 1".to_string(), description: "First".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
             .unwrap();
 
         let step2 = plan
-            .create_step(
-                "Step 2",
-                "Second",
-                None,
-                vec![],
-                vec![step1.id.clone()],
-                false,
-                HashMap::new(),
-            )
+            .create_step(CreateStepInput { subject: "Step 2".to_string(), description: "Second".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![step1.id.clone()], requires_approval: false, metadata: HashMap::new() })
             .unwrap();
 
         assert_eq!(step2.status, PlanStepStatus::Blocked);
@@ -1115,37 +1060,13 @@ mod tests {
 
         // Create multiple steps
         let _ = plan
-            .create_step(
-                "Step 1",
-                "First",
-                None,
-                vec![],
-                vec![],
-                false,
-                HashMap::new(),
-            )
+            .create_step(CreateStepInput { subject: "Step 1".to_string(), description: "First".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
             .unwrap();
         let step2 = plan
-            .create_step(
-                "Step 2",
-                "Second",
-                None,
-                vec![],
-                vec![],
-                false,
-                HashMap::new(),
-            )
+            .create_step(CreateStepInput { subject: "Step 2".to_string(), description: "Second".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
             .unwrap();
-        let step3 = plan
-            .create_step(
-                "Step 3",
-                "Third",
-                None,
-                vec![],
-                vec![],
-                true,
-                HashMap::new(),
-            )
+        let _step3 = plan
+            .create_step(CreateStepInput { subject: "Step 3".to_string(), description: "Third".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: true, metadata: HashMap::new() })
             .unwrap();
 
         // Update some statuses

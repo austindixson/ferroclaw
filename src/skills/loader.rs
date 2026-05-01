@@ -66,11 +66,11 @@ pub fn load_and_register_skills(
             continue;
         }
 
-        if let Some(ref cats) = enabled_categories {
-            if !cats.contains(&skill.category) {
-                stats.skipped += 1;
-                continue;
-            }
+        if let Some(ref cats) = enabled_categories
+            && !cats.contains(&skill.category)
+        {
+            stats.skipped += 1;
+            continue;
         }
 
         match register_skill(registry, skill) {

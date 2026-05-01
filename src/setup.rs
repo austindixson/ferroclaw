@@ -35,9 +35,10 @@ pub fn run_wizard() -> anyhow::Result<()> {
     println!("    2) OpenAI      (GPT-4o, GPT-4o-mini)");
     println!("    3) Zai GLM     (GLM-5, GLM-4.5, GLM-4.6)");
     println!("    4) OpenRouter  (multi-model gateway)");
-    println!("    5) Multiple providers\n");
+    println!("    5) NVIDIA      (NIM OpenAI-compatible API)");
+    println!("    6) Multiple providers\n");
 
-    let provider_choice = prompt_choice("  Select [1-5]", 1, 5, 1);
+    let provider_choice = prompt_choice("  Select [1-6]", 1, 6, 1);
 
     let mut providers = ProviderSetup::default();
 
@@ -56,6 +57,14 @@ pub fn run_wizard() -> anyhow::Result<()> {
             providers.openrouter = setup_provider("OpenRouter", "OPENROUTER_API_KEY", &mut env_vars)
         }
         5 => {
+            providers.nvidia = setup_provider_with_url(
+                "NVIDIA",
+                "NVIDIA_API_KEY",
+                "https://integrate.api.nvidia.com/v1",
+                &mut env_vars,
+            )
+        }
+        6 => {
             println!("\n  Configure each provider you want:\n");
             if confirm("    Anthropic?", true) {
                 providers.anthropic =
@@ -69,8 +78,88 @@ pub fn run_wizard() -> anyhow::Result<()> {
                     &mut env_vars,
                 );
             }
+            if confirm("    OpenAI Codex (OAuth token)?", false) {
+                providers.openai_codex = setup_provider_with_url(
+                    "OpenAI Codex",
+                    "OPENAI_OAUTH_TOKEN",
+                    "https://chatgpt.com/backend-api/codex",
+                    &mut env_vars,
+                );
+            }
+            if confirm("    Google (Gemini OpenAI-compatible endpoint)?", false) {
+                providers.google = setup_provider_with_url(
+                    "Google",
+                    "GEMINI_API_KEY",
+                    "https://generativelanguage.googleapis.com/v1beta/openai",
+                    &mut env_vars,
+                );
+            }
+            if confirm("    xAI?", false) {
+                providers.xai = setup_provider_with_url(
+                    "xAI",
+                    "XAI_API_KEY",
+                    "https://api.x.ai/v1",
+                    &mut env_vars,
+                );
+            }
+            if confirm("    NVIDIA NIM (OpenAI-compatible endpoint)?", false) {
+                providers.nvidia = setup_provider_with_url(
+                    "NVIDIA",
+                    "NVIDIA_API_KEY",
+                    "https://integrate.api.nvidia.com/v1",
+                    &mut env_vars,
+                );
+            }
             if confirm("    Zai GLM?", false) {
                 providers.zai = setup_provider("Zai GLM", "ZAI_API_KEY", &mut env_vars);
+            }
+            if confirm("    llama.cpp (local OpenAI-compatible server)?", false) {
+                providers.llamacpp = setup_provider_with_url(
+                    "llama.cpp",
+                    "LLAMACPP_API_KEY",
+                    "http://127.0.0.1:8000/v1",
+                    &mut env_vars,
+                );
+            }
+            if confirm("    Mistral?", false) {
+                providers.mistral = setup_provider_with_url(
+                    "Mistral",
+                    "MISTRAL_API_KEY",
+                    "https://api.mistral.ai/v1",
+                    &mut env_vars,
+                );
+            }
+            if confirm("    Azure OpenAI?", false) {
+                providers.azure_openai = setup_provider_with_url(
+                    "Azure OpenAI",
+                    "AZURE_OPENAI_API_KEY",
+                    "https://<resource>.openai.azure.com/openai/v1",
+                    &mut env_vars,
+                );
+            }
+            if confirm("    GitHub Copilot?", false) {
+                providers.github_copilot = setup_provider_with_url(
+                    "GitHub Copilot",
+                    "GITHUB_COPILOT_API_KEY",
+                    "https://api.githubcopilot.com",
+                    &mut env_vars,
+                );
+            }
+            if confirm("    Google Vertex (OpenAI-compatible endpoint)?", false) {
+                providers.google_vertex = setup_provider_with_url(
+                    "Google Vertex",
+                    "GOOGLE_VERTEX_API_KEY",
+                    "https://aiplatform.googleapis.com/v1/projects/<project>/locations/<location>/endpoints/openapi",
+                    &mut env_vars,
+                );
+            }
+            if confirm("    Bedrock (OpenAI-compatible endpoint)?", false) {
+                providers.bedrock = setup_provider_with_url(
+                    "Bedrock",
+                    "AWS_BEARER_TOKEN_BEDROCK",
+                    "https://bedrock-runtime.<region>.amazonaws.com/openai/v1",
+                    &mut env_vars,
+                );
             }
             if confirm("    OpenRouter?", false) {
                 providers.openrouter =
@@ -282,16 +371,16 @@ pub fn run_wizard() -> anyhow::Result<()> {
     }
 
     // Write config.toml
-    let toml = generate_config_toml(
-        &providers,
-        &default_model,
-        &capabilities,
+    let toml = generate_config_toml(SetupTomlParams {
+        providers: &providers,
+        default_model: &default_model,
+        capabilities: &capabilities,
         load_bundled,
-        &enabled_categories,
-        &channels,
-        &mcp_servers,
+        enabled_categories: &enabled_categories,
+        channels: &channels,
+        mcp_servers: &mcp_servers,
         gateway_port,
-    );
+    });
     std::fs::write(&config_path, &toml)?;
 
     // ── Verify connection ───────────────────────────────────────────────
@@ -366,17 +455,18 @@ unsafe fn libc_isatty(_fd: i32) -> i32 {
 
 fn print_banner() {
     println!();
-    println!(r"   ___                     _              ");
-    println!(r"  / __\__ _ __ _ __ ___   ___| | __ ___      __");
-    println!(r" / _\ / _ \ '__| '__/ _ \ / __| |/ _` \ \ /\ / /");
-    println!(r"/ /  |  __/ |  | | | (_) | (__| | (_| |\ V  V / ");
-    println!(r"\/    \___|_|  |_|  \___/ \___|_|\__,_| \_/\_/  ");
+    println!("  ███████╗███████╗██████╗ ██████╗  ██████╗  ██████╗██╗      █████╗ ██╗    ██╗");
+    println!("  ██╔════╝██╔════╝██╔══██╗██╔══██╗██╔═══██╗██╔════╝██║     ██╔══██╗██║    ██║");
+    println!("  █████╗  █████╗  ██████╔╝██████╔╝██║   ██║██║     ██║     ███████║██║ █╗ ██║");
+    println!("  ██╔══╝  ██╔══╝  ██╔══██╗██╔══██╗██║   ██║██║     ██║     ██╔══██║██║███╗██║");
+    println!("  ██║     ███████╗██║  ██║██║  ██║╚██████╔╝╚██████╗███████╗██║  ██║╚███╔███╔╝");
+    println!("  ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝  ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝");
     println!();
     println!(
         "  v{}  —  Security-first AI agent",
         env!("CARGO_PKG_VERSION")
     );
-    println!("  84 skills | 7 channels | 4 providers | DietMCP");
+    println!("  84 skills | 7 channels | 14 providers | DietMCP");
     println!();
     divider();
     println!();
@@ -465,7 +555,7 @@ fn disable_echo() -> Option<EchoGuard> {
         }
         let guard = EchoGuard { original: term };
         term.c_lflag &= !ECHO_FLAG;
-        tcsetattr(0, 0, &mut term);
+        tcsetattr(0, 0, &term);
         Some(guard)
     }
 }
@@ -516,10 +606,10 @@ fn prompt_choice(label: &str, min: u32, max: u32, default: u32) -> u32 {
         if input.is_empty() {
             return default;
         }
-        if let Ok(n) = input.parse::<u32>() {
-            if n >= min && n <= max {
-                return n;
-            }
+        if let Ok(n) = input.parse::<u32>()
+            && n >= min && n <= max
+        {
+            return n;
         }
         println!("  Please enter a number between {min} and {max}.");
     }
@@ -531,7 +621,17 @@ fn prompt_choice(label: &str, min: u32, max: u32, default: u32) -> u32 {
 struct ProviderSetup {
     anthropic: Option<ProviderEntry>,
     openai: Option<ProviderEntry>,
+    openai_codex: Option<ProviderEntry>,
+    google: Option<ProviderEntry>,
+    xai: Option<ProviderEntry>,
+    nvidia: Option<ProviderEntry>,
     zai: Option<ProviderEntry>,
+    llamacpp: Option<ProviderEntry>,
+    mistral: Option<ProviderEntry>,
+    azure_openai: Option<ProviderEntry>,
+    github_copilot: Option<ProviderEntry>,
+    google_vertex: Option<ProviderEntry>,
+    bedrock: Option<ProviderEntry>,
     openrouter: Option<ProviderEntry>,
 }
 
@@ -550,8 +650,38 @@ impl ProviderSetup {
         if self.openai.is_some() {
             names.push("OpenAI");
         }
+        if self.openai_codex.is_some() {
+            names.push("OpenAI Codex");
+        }
+        if self.google.is_some() {
+            names.push("Google");
+        }
+        if self.xai.is_some() {
+            names.push("xAI");
+        }
+        if self.nvidia.is_some() {
+            names.push("NVIDIA");
+        }
         if self.zai.is_some() {
             names.push("Zai GLM");
+        }
+        if self.llamacpp.is_some() {
+            names.push("llama.cpp");
+        }
+        if self.mistral.is_some() {
+            names.push("Mistral");
+        }
+        if self.azure_openai.is_some() {
+            names.push("Azure OpenAI");
+        }
+        if self.github_copilot.is_some() {
+            names.push("GitHub Copilot");
+        }
+        if self.google_vertex.is_some() {
+            names.push("Google Vertex");
+        }
+        if self.bedrock.is_some() {
+            names.push("Bedrock");
         }
         if self.openrouter.is_some() {
             names.push("OpenRouter");
@@ -617,13 +747,37 @@ fn setup_provider_with_url(
     env_vars.push((env_var.into(), key));
 
     let base = prompt_string("    Base URL", default_url);
-    let base_url = if base == default_url {
-        None
-    } else {
-        Some(base)
-    };
+    // Always persist the chosen base URL, even when it's the provider default.
+    // OpenAI-compatible provider configs deserialize with OpenAI defaults when
+    // base_url is omitted, which can silently misroute non-OpenAI providers
+    // (e.g. NVIDIA, Google, xAI) to api.openai.com.
+    let base_url = Some(base);
 
-    let models = vec!["gpt-4o".into(), "gpt-4o-mini".into()];
+    let models = match name {
+        "OpenAI" => vec!["gpt-4o".into(), "gpt-4o-mini".into()],
+        "OpenAI Codex" => vec![
+            "gpt-5.4-mini".into(),
+            "gpt-5.4".into(),
+            "gpt-5.3-codex".into(),
+            "gpt-5.2-codex".into(),
+        ],
+        "Google" => vec![
+            "google:gemini-2.5-pro".into(),
+            "google:gemini-2.5-flash".into(),
+        ],
+        "xAI" => vec!["xai:grok-4".into(), "xai:grok-3-mini".into()],
+        "NVIDIA" => vec!["z-ai/glm4.7".into(), "meta/llama-3.1-70b-instruct".into()],
+        "llama.cpp" => vec!["llamacpp:local-model".into()],
+        "Mistral" => vec![
+            "mistral:mistral-large-latest".into(),
+            "mistral:mistral-small-latest".into(),
+        ],
+        "Azure OpenAI" => vec!["azure:gpt-4o".into()],
+        "GitHub Copilot" => vec!["copilot:gpt-4o".into()],
+        "Google Vertex" => vec!["vertex:gemini-2.5-pro".into()],
+        "Bedrock" => vec!["bedrock:anthropic.claude-3-7-sonnet".into()],
+        _ => vec!["gpt-4o".into()],
+    };
     Some(ProviderEntry {
         env_var: env_var.into(),
         base_url,
@@ -643,9 +797,59 @@ fn pick_default_model(providers: &ProviderSetup) -> String {
             options.push((m.clone(), "OpenAI".into()));
         }
     }
+    if let Some(ref p) = providers.openai_codex {
+        for m in &p.models {
+            options.push((m.clone(), "OpenAI Codex".into()));
+        }
+    }
+    if let Some(ref p) = providers.google {
+        for m in &p.models {
+            options.push((m.clone(), "Google".into()));
+        }
+    }
+    if let Some(ref p) = providers.xai {
+        for m in &p.models {
+            options.push((m.clone(), "xAI".into()));
+        }
+    }
+    if let Some(ref p) = providers.nvidia {
+        for m in &p.models {
+            options.push((m.clone(), "NVIDIA".into()));
+        }
+    }
     if let Some(ref p) = providers.zai {
         for m in &p.models {
             options.push((m.clone(), "Zai".into()));
+        }
+    }
+    if let Some(ref p) = providers.llamacpp {
+        for m in &p.models {
+            options.push((m.clone(), "llama.cpp".into()));
+        }
+    }
+    if let Some(ref p) = providers.mistral {
+        for m in &p.models {
+            options.push((m.clone(), "Mistral".into()));
+        }
+    }
+    if let Some(ref p) = providers.azure_openai {
+        for m in &p.models {
+            options.push((m.clone(), "Azure OpenAI".into()));
+        }
+    }
+    if let Some(ref p) = providers.github_copilot {
+        for m in &p.models {
+            options.push((m.clone(), "GitHub Copilot".into()));
+        }
+    }
+    if let Some(ref p) = providers.google_vertex {
+        for m in &p.models {
+            options.push((m.clone(), "Google Vertex".into()));
+        }
+    }
+    if let Some(ref p) = providers.bedrock {
+        for m in &p.models {
+            options.push((m.clone(), "Bedrock".into()));
         }
     }
     if let Some(ref p) = providers.openrouter {
@@ -934,6 +1138,25 @@ fn verify_api_key(providers: &ProviderSetup) -> bool {
         };
     }
 
+    if let Some(ref p) = providers.nvidia {
+        let key = std::env::var(&p.env_var).unwrap_or_default();
+        if key.is_empty() {
+            return false;
+        }
+        let base = p
+            .base_url
+            .as_deref()
+            .unwrap_or("https://integrate.api.nvidia.com/v1");
+        let resp = client
+            .get(format!("{base}/models"))
+            .header("Authorization", format!("Bearer {key}"))
+            .send();
+        return match resp {
+            Ok(r) => r.status().is_success(),
+            Err(_) => false,
+        };
+    }
+
     if let Some(ref p) = providers.zai {
         let key = std::env::var(&p.env_var).unwrap_or_default();
         return !key.is_empty(); // Zai doesn't have a simple health endpoint
@@ -1015,16 +1238,50 @@ fn load_env_from_path(env_path: &std::path::Path) {
 
 // ── TOML generator ──────────────────────────────────────────────────────────
 
-fn generate_config_toml(
-    providers: &ProviderSetup,
-    default_model: &str,
-    capabilities: &[&str],
+fn push_openai_compatible_provider_section(
+    t: &mut String,
+    section: &str,
+    p: &ProviderEntry,
+    oauth: bool,
+) {
+    t.push_str(&format!("[providers.{section}]\n"));
+    t.push_str(&format!("api_key_env = \"{}\"\n", p.env_var));
+    if oauth {
+        t.push_str("auth_mode = \"oauth\"\n");
+        t.push_str(&format!("oauth_token_env = \"{}\"\n", p.env_var));
+    }
+    if let Some(ref url) = p.base_url {
+        t.push_str(&format!("base_url = \"{url}\"\n"));
+    }
+    t.push_str(
+        "max_tokens = 8192\nrequest_timeout_ms = 15000\nmax_retries = 2\nno_retry_max_tokens_threshold = 128\n",
+    );
+    t.push('\n');
+}
+
+struct SetupTomlParams<'a> {
+    providers: &'a ProviderSetup,
+    default_model: &'a str,
+    capabilities: &'a [&'a str],
     load_bundled: bool,
-    enabled_categories: &Option<Vec<String>>,
-    channels: &ChannelSetup,
-    mcp_servers: &[McpEntry],
+    enabled_categories: &'a Option<Vec<String>>,
+    channels: &'a ChannelSetup,
+    mcp_servers: &'a [McpEntry],
     gateway_port: u16,
-) -> String {
+}
+
+fn generate_config_toml(params: SetupTomlParams<'_>) -> String {
+    let SetupTomlParams {
+        providers,
+        default_model,
+        capabilities,
+        load_bundled,
+        enabled_categories,
+        channels,
+        mcp_servers,
+        gateway_port,
+    } = params;
+
     let mut t = String::with_capacity(2048);
 
     t.push_str("# Ferroclaw Configuration\n# Generated by `ferroclaw setup`\n\n");
@@ -1032,7 +1289,7 @@ fn generate_config_toml(
     // Agent
     t.push_str("[agent]\n");
     t.push_str(&format!("default_model = \"{default_model}\"\n"));
-    t.push_str("max_iterations = 30\ntoken_budget = 200000\nmax_tool_calls_per_iteration = 8\nmax_tool_calls_total = 64\n\n");
+    t.push_str("max_iterations = 150\ntoken_budget = 200000\nmax_tool_calls_per_iteration = 8\nmax_tool_calls_total = 64\nmax_wall_clock_ms = 0\ndeadline_aware_completion = true\ndeadline_tight_ms = 1200\ndeadline_tight_max_tokens = 96\n\n");
 
     // Providers — env var names only, actual keys are in .env
     if let Some(ref p) = providers.anthropic {
@@ -1041,24 +1298,59 @@ fn generate_config_toml(
         if let Some(ref url) = p.base_url {
             t.push_str(&format!("base_url = \"{url}\"\n"));
         }
+        t.push_str("max_tokens = 8192\nrequest_timeout_ms = 15000\nmax_retries = 2\nno_retry_max_tokens_threshold = 128\n");
         t.push('\n');
     }
+
     if let Some(ref p) = providers.openai {
-        t.push_str("[providers.openai]\n");
-        t.push_str(&format!("api_key_env = \"{}\"\n", p.env_var));
-        if let Some(ref url) = p.base_url {
-            t.push_str(&format!("base_url = \"{url}\"\n"));
-        }
-        t.push('\n');
+        push_openai_compatible_provider_section(&mut t, "openai", p, false);
+    }
+    if let Some(ref p) = providers.openai_codex {
+        push_openai_compatible_provider_section(&mut t, "openai_codex", p, true);
+    }
+    if let Some(ref p) = providers.google {
+        push_openai_compatible_provider_section(&mut t, "google", p, false);
+    }
+    if let Some(ref p) = providers.xai {
+        push_openai_compatible_provider_section(&mut t, "xai", p, false);
+    }
+    if let Some(ref p) = providers.nvidia {
+        push_openai_compatible_provider_section(&mut t, "nvidia", p, false);
     }
     if let Some(ref p) = providers.zai {
         t.push_str("[providers.zai]\n");
         t.push_str(&format!("api_key_env = \"{}\"\n", p.env_var));
+        if let Some(ref url) = p.base_url {
+            t.push_str(&format!("base_url = \"{url}\"\n"));
+        }
+        t.push_str("max_tokens = 8192\nrequest_timeout_ms = 15000\nmax_retries = 2\nno_retry_max_tokens_threshold = 128\n");
         t.push('\n');
+    }
+    if let Some(ref p) = providers.llamacpp {
+        push_openai_compatible_provider_section(&mut t, "llamacpp", p, false);
+    }
+    if let Some(ref p) = providers.mistral {
+        push_openai_compatible_provider_section(&mut t, "mistral", p, false);
+    }
+    if let Some(ref p) = providers.azure_openai {
+        push_openai_compatible_provider_section(&mut t, "azure_openai", p, false);
+    }
+    if let Some(ref p) = providers.github_copilot {
+        push_openai_compatible_provider_section(&mut t, "github_copilot", p, false);
+    }
+    if let Some(ref p) = providers.google_vertex {
+        push_openai_compatible_provider_section(&mut t, "google_vertex", p, false);
+    }
+    if let Some(ref p) = providers.bedrock {
+        push_openai_compatible_provider_section(&mut t, "bedrock", p, false);
     }
     if let Some(ref p) = providers.openrouter {
         t.push_str("[providers.openrouter]\n");
         t.push_str(&format!("api_key_env = \"{}\"\n", p.env_var));
+        if let Some(ref url) = p.base_url {
+            t.push_str(&format!("base_url = \"{url}\"\n"));
+        }
+        t.push_str("max_tokens = 8192\nrequest_timeout_ms = 15000\nmax_retries = 2\nno_retry_max_tokens_threshold = 128\n");
         t.push('\n');
     }
 
@@ -1076,11 +1368,11 @@ fn generate_config_toml(
     // Skills
     t.push_str("[skills]\n");
     t.push_str(&format!("load_bundled = {load_bundled}\n"));
-    if let Some(cats) = enabled_categories {
-        if !cats.is_empty() {
-            let c: Vec<String> = cats.iter().map(|c| format!("\"{c}\"")).collect();
-            t.push_str(&format!("enabled_categories = [{}]\n", c.join(", ")));
-        }
+    if let Some(cats) = enabled_categories
+        && !cats.is_empty()
+    {
+        let c: Vec<String> = cats.iter().map(|c| format!("\"{c}\"")).collect();
+        t.push_str(&format!("enabled_categories = [{}]\n", c.join(", ")));
     }
     t.push('\n');
 

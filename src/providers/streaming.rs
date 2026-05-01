@@ -7,10 +7,10 @@ pub fn parse_sse_lines(raw: &str) -> Vec<SseLine> {
     let mut current_data = Vec::new();
 
     for line in raw.lines() {
-        if line.starts_with("event: ") {
-            current_event = Some(line[7..].to_string());
-        } else if line.starts_with("data: ") {
-            current_data.push(line[6..].to_string());
+        if let Some(stripped) = line.strip_prefix("event: ") {
+            current_event = Some(stripped.to_string());
+        } else if let Some(stripped) = line.strip_prefix("data: ") {
+            current_data.push(stripped.to_string());
         } else if line.is_empty() && !current_data.is_empty() {
             lines.push(SseLine {
                 event: current_event.take(),

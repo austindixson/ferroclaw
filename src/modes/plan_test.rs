@@ -9,7 +9,7 @@
 
 #[cfg(test)]
 mod plan_mode_tests {
-    use ferroclaw::modes::plan::{PlanMode, PlanPhase, PlanStepStatus};
+    use ferroclaw::modes::plan::{CreateStepInput, PlanMode, PlanPhase, PlanStepStatus};
     use ferroclaw::tasks::TaskStore;
     use std::collections::HashMap;
 
@@ -119,15 +119,7 @@ mod plan_mode_tests {
             let mut plan = create_test_plan();
 
             let step = plan
-                .create_step(
-                    "Test step",
-                    "Test description",
-                    Some("Testing".into()),
-                    vec!["Criterion 1".into()],
-                    vec![],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Test step".to_string(), description: "Test description".to_string(), active_form: Some("Testing".into()), acceptance_criteria: vec!["Criterion 1".into()], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step creation should succeed");
 
             assert_eq!(step.subject, "Test step");
@@ -144,15 +136,7 @@ mod plan_mode_tests {
             let mut plan = create_test_plan();
 
             let step = plan
-                .create_step(
-                    "Sensitive step",
-                    "Requires approval",
-                    None,
-                    vec![],
-                    vec![],
-                    true, // requires_approval
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Sensitive step".to_string(), description: "Requires approval".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: true, metadata: HashMap::new() })
                 .expect("Step creation should succeed");
 
             assert_eq!(step.status, PlanStepStatus::AwaitingApproval);
@@ -166,20 +150,12 @@ mod plan_mode_tests {
 
             // Create independent step first
             let step1 = plan
-                .create_step("Step 1", "First", None, vec![], vec![], false, HashMap::new())
+                .create_step(CreateStepInput { subject: "Step 1".to_string(), description: "First".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 1 creation should succeed");
 
             // Create dependent step
             let step2 = plan
-                .create_step(
-                    "Step 2",
-                    "Second",
-                    None,
-                    vec![],
-                    vec![step1.id.clone()],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Step 2".to_string(), description: "Second".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![step1.id.clone()], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 2 creation should succeed");
 
             assert_eq!(step2.depends_on, vec![step1.id]);
@@ -191,15 +167,7 @@ mod plan_mode_tests {
         fn test_create_step_with_invalid_dependency_fails() {
             let mut plan = create_test_plan();
 
-            let result = plan.create_step(
-                "Invalid step",
-                "Has non-existent dependency",
-                None,
-                vec![],
-                vec!["nonexistent-id".to_string()],
-                false,
-                HashMap::new(),
-            );
+            let result = plan.create_step(CreateStepInput { subject: "Invalid step".to_string(), description: "Has non-existent dependency".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec!["nonexistent-id".to_string()], requires_approval: false, metadata: HashMap::new() });
 
             assert!(result.is_err());
             let err_msg = result.unwrap_err().to_string();
@@ -215,15 +183,7 @@ mod plan_mode_tests {
             metadata.insert("estimated_hours".to_string(), serde_json::json!(5));
 
             let step = plan
-                .create_step(
-                    "Step with metadata",
-                    "Description",
-                    None,
-                    vec![],
-                    vec![],
-                    false,
-                    metadata.clone(),
-                )
+                .create_step(CreateStepInput { subject: "Step with metadata".to_string(), description: "Description".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: metadata.clone() })
                 .expect("Step creation should succeed");
 
             assert_eq!(step.metadata.get("priority").unwrap(), &serde_json::json!("high"));
@@ -238,15 +198,7 @@ mod plan_mode_tests {
             let mut plan = create_test_plan();
 
             let created = plan
-                .create_step(
-                    "Test step",
-                    "Description",
-                    None,
-                    vec![],
-                    vec![],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Test step".to_string(), description: "Description".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step creation should succeed");
 
             let retrieved = plan
@@ -275,11 +227,11 @@ mod plan_mode_tests {
             let mut plan = create_test_plan();
 
             let step1 = plan
-                .create_step("Step 1", "First", None, vec![], vec![], false, HashMap::new())
+                .create_step(CreateStepInput { subject: "Step 1".to_string(), description: "First".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 1 creation should succeed");
 
             let step2 = plan
-                .create_step("Step 2", "Second", None, vec![], vec![], false, HashMap::new())
+                .create_step(CreateStepInput { subject: "Step 2".to_string(), description: "Second".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 2 creation should succeed");
 
             assert_eq!(step1.wave, 0);
@@ -295,31 +247,15 @@ mod plan_mode_tests {
             let mut plan = create_test_plan();
 
             let step1 = plan
-                .create_step("Step 1", "First", None, vec![], vec![], false, HashMap::new())
+                .create_step(CreateStepInput { subject: "Step 1".to_string(), description: "First".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 1 creation should succeed");
 
             let step2 = plan
-                .create_step(
-                    "Step 2",
-                    "Second",
-                    None,
-                    vec![],
-                    vec![step1.id.clone()],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Step 2".to_string(), description: "Second".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![step1.id.clone()], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 2 creation should succeed");
 
             let step3 = plan
-                .create_step(
-                    "Step 3",
-                    "Third",
-                    None,
-                    vec![],
-                    vec![step2.id.clone()],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Step 3".to_string(), description: "Third".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![step2.id.clone()], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 3 creation should succeed");
 
             assert_eq!(step1.wave, 0);
@@ -339,43 +275,19 @@ mod plan_mode_tests {
 
             // Create diamond: A -> B, A -> C, B -> D, C -> D
             let step_a = plan
-                .create_step("A", "Base", None, vec![], vec![], false, HashMap::new())
+                .create_step(CreateStepInput { subject: "A".to_string(), description: "Base".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step A creation should succeed");
 
             let step_b = plan
-                .create_step(
-                    "B",
-                    "Branch 1",
-                    None,
-                    vec![],
-                    vec![step_a.id.clone()],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "B".to_string(), description: "Branch 1".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![step_a.id.clone()], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step B creation should succeed");
 
             let step_c = plan
-                .create_step(
-                    "C",
-                    "Branch 2",
-                    None,
- vec![],
-                    vec![step_a.id.clone()],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "C".to_string(), description: "Branch 2".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![step_a.id.clone()], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step C creation should succeed");
 
             let step_d = plan
-                .create_step(
-                    "D",
-                    "Merge",
-                    None,
-                    vec![],
-                    vec![step_b.id.clone(), step_c.id.clone()],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "D".to_string(), description: "Merge".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![step_b.id.clone(), step_c.id.clone()], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step D creation should succeed");
 
             assert_eq!(step_a.wave, 0);
@@ -396,43 +308,19 @@ mod plan_mode_tests {
 
             // Create complex graph with multiple dependencies
             let step1 = plan
-                .create_step("1", "Base", None, vec![], vec![], false, HashMap::new())
+                .create_step(CreateStepInput { subject: "1".to_string(), description: "Base".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 1 creation should succeed");
 
             let step2 = plan
-                .create_step(
-                    "2",
-                    "Depends on 1",
-                    None,
-                    vec![],
-                    vec![step1.id.clone()],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "2".to_string(), description: "Depends on 1".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![step1.id.clone()], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 2 creation should succeed");
 
             let step3 = plan
-                .create_step(
-                    "3",
-                    "Also depends on 1",
-                    None,
-                    vec![],
-                    vec![step1.id.clone()],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "3".to_string(), description: "Also depends on 1".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![step1.id.clone()], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 3 creation should succeed");
 
             let step4 = plan
-                .create_step(
-                    "4",
-                    "Depends on 2 and 3",
-                    None,
-                    vec![],
-                    vec![step2.id.clone(), step3.id.clone()],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "4".to_string(), description: "Depends on 2 and 3".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![step2.id.clone(), step3.id.clone()], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 4 creation should succeed");
 
             assert_eq!(step1.wave, 0);
@@ -448,13 +336,13 @@ mod plan_mode_tests {
         fn test_list_steps_ordered_by_creation() {
             let mut plan = create_test_plan();
 
-            plan.create_step("Step 1", "First", None, vec![], vec![], false, HashMap::new())
+            plan.create_step(CreateStepInput { subject: "Step 1".to_string(), description: "First".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 1 creation should succeed");
 
-            plan.create_step("Step 2", "Second", None, vec![], vec![], false, HashMap::new())
+            plan.create_step(CreateStepInput { subject: "Step 2".to_string(), description: "Second".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 2 creation should succeed");
 
-            plan.create_step("Step 3", "Third", None, vec![], vec![], false, HashMap::new())
+            plan.create_step(CreateStepInput { subject: "Step 3".to_string(), description: "Third".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 3 creation should succeed");
 
             let steps = plan.list_steps().expect("List steps should succeed");
@@ -475,15 +363,7 @@ mod plan_mode_tests {
             let mut plan = create_test_plan();
 
             let step = plan
-                .create_step(
-                    "Sensitive step",
-                    "Needs approval",
-                    None,
-                    vec![],
-                    vec![],
-                    true,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Sensitive step".to_string(), description: "Needs approval".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: true, metadata: HashMap::new() })
                 .expect("Step creation should succeed");
 
             assert!(step.requires_approval);
@@ -495,15 +375,7 @@ mod plan_mode_tests {
             let mut plan = create_test_plan();
 
             let step = plan
-                .create_step(
-                    "Sensitive step",
-                    "Needs approval",
-                    None,
-                    vec![],
-                    vec![],
-                    true,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Sensitive step".to_string(), description: "Needs approval".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: true, metadata: HashMap::new() })
                 .expect("Step creation should succeed");
 
             let approved = plan
@@ -520,15 +392,7 @@ mod plan_mode_tests {
             let mut plan = create_test_plan();
 
             let step = plan
-                .create_step(
-                    "Normal step",
-                    "No approval needed",
-                    None,
-                    vec![],
-                    vec![],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Normal step".to_string(), description: "No approval needed".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step creation should succeed");
 
             let result = plan.approve_step(&step.id);
@@ -569,15 +433,7 @@ mod plan_mode_tests {
             let mut plan = create_test_plan();
 
             let step = plan
-                .create_step(
-                    "Test step",
-                    "Description",
-                    None,
-                    vec![],
-                    vec![],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Test step".to_string(), description: "Description".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step creation should succeed");
 
             let updated = plan
@@ -593,15 +449,7 @@ mod plan_mode_tests {
             let mut plan = create_test_plan();
 
             let step = plan
-                .create_step(
-                    "Test step",
-                    "Description",
-                    None,
-                    vec![],
-                    vec![],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Test step".to_string(), description: "Description".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step creation should succeed");
 
             let completed = plan
@@ -617,15 +465,7 @@ mod plan_mode_tests {
             let mut plan = create_test_plan();
 
             let step = plan
-                .create_step(
-                    "Test step",
-                    "Description",
-                    None,
-                    vec![],
-                    vec![],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Test step".to_string(), description: "Description".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step creation should succeed");
 
             let failed = plan
@@ -641,19 +481,11 @@ mod plan_mode_tests {
             let mut plan = create_test_plan();
 
             let step1 = plan
-                .create_step("Step 1", "First", None, vec![], vec![], false, HashMap::new())
+                .create_step(CreateStepInput { subject: "Step 1".to_string(), description: "First".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 1 creation should succeed");
 
             let step2 = plan
-                .create_step(
-                    "Step 2",
-                    "Second",
-                    None,
-                    vec![],
-                    vec![step1.id.clone()],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Step 2".to_string(), description: "Second".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![step1.id.clone()], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 2 creation should succeed");
 
             assert_eq!(step2.status, PlanStepStatus::Blocked);
@@ -676,23 +508,15 @@ mod plan_mode_tests {
             let mut plan = create_test_plan();
 
             let step1 = plan
-                .create_step("Step 1", "First", None, vec![], vec![], false, HashMap::new())
+                .create_step(CreateStepInput { subject: "Step 1".to_string(), description: "First".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 1 creation should succeed");
 
             let step2 = plan
-                .create_step("Step 2", "Second", None, vec![], vec![], false, HashMap::new())
+                .create_step(CreateStepInput { subject: "Step 2".to_string(), description: "Second".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 2 creation should succeed");
 
             let step3 = plan
-                .create_step(
-                    "Step 3",
-                    "Depends on both",
-                    None,
-                    vec![],
-                    vec![step1.id.clone(), step2.id.clone()],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Step 3".to_string(), description: "Depends on both".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![step1.id.clone(), step2.id.clone()], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 3 creation should succeed");
 
             assert_eq!(step3.status, PlanStepStatus::Blocked);
@@ -757,31 +581,15 @@ mod plan_mode_tests {
 
             // Create steps in different states
             let step1 = plan
-                .create_step("Step 1", "First", None, vec![], vec![], false, HashMap::new())
+                .create_step(CreateStepInput { subject: "Step 1".to_string(), description: "First".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 1 creation should succeed");
 
             let step2 = plan
-                .create_step(
-                    "Step 2",
-                    "Needs approval",
-                    None,
-                    vec![],
-                    vec![],
-                    true,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Step 2".to_string(), description: "Needs approval".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: true, metadata: HashMap::new() })
                 .expect("Step 2 creation should succeed");
 
             let step3 = plan
-                .create_step(
-                    "Step 3",
-                    "Depends on 1",
-                    None,
-                    vec![],
-                    vec![step1.id.clone()],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Step 3".to_string(), description: "Depends on 1".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![step1.id.clone()], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 3 creation should succeed");
 
             // Update some statuses
@@ -802,11 +610,11 @@ mod plan_mode_tests {
         fn test_status_includes_waves() {
             let mut plan = create_test_plan();
 
-            plan.create_step("Step 1", "First", None, vec![], vec![], false, HashMap::new())
+            plan.create_step(CreateStepInput { subject: "Step 1".to_string(), description: "First".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 1 creation should succeed");
 
             let step2 = plan
-                .create_step("Step 1", "First", None, vec![], vec![], false, HashMap::new())
+                .create_step(CreateStepInput { subject: "Step 1".to_string(), description: "First".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 2 creation should succeed");
 
             let status = plan.status().expect("Status should succeed");
@@ -838,15 +646,7 @@ mod plan_mode_tests {
             let mut plan = create_test_plan();
 
             let step = plan
-                .create_step(
-                    "Persistent step",
-                    "Should persist in TaskStore",
-                    None,
-                    vec![],
-                    vec![],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Persistent step".to_string(), description: "Should persist in TaskStore".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step creation should succeed");
 
             // Verify step exists in task store
@@ -863,15 +663,7 @@ mod plan_mode_tests {
             let mut plan = create_test_plan();
 
             let step = plan
-                .create_step(
-                    "Sync test",
-                    "Should sync with task",
-                    None,
-                    vec![],
-                    vec![],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Sync test".to_string(), description: "Should sync with task".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step creation should succeed");
 
             // PlanStepStatus::Pending maps to TaskStatus::Pending
@@ -899,19 +691,11 @@ mod plan_mode_tests {
             let mut plan = create_test_plan();
 
             let step1 = plan
-                .create_step("Step 1", "First", None, vec![], vec![], false, HashMap::new())
+                .create_step(CreateStepInput { subject: "Step 1".to_string(), description: "First".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 1 creation should succeed");
 
             let step2 = plan
-                .create_step(
-                    "Step 2",
-                    "Blocked",
-                    None,
-                    vec![],
-                    vec![step1.id.clone()],
-                    false,
-                    HashMap::new(),
-                )
+                .create_step(CreateStepInput { subject: "Step 2".to_string(), description: "Blocked".to_string(), active_form: None, acceptance_criteria: vec![], depends_on: vec![step1.id.clone()], requires_approval: false, metadata: HashMap::new() })
                 .expect("Step 2 creation should succeed");
 
             // PlanStepStatus::Blocked, but TaskStatus::Pending in store

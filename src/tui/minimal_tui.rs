@@ -24,7 +24,7 @@ use crate::types::Message;
 
 use super::app::{App, ChatEntry};
 use super::events::{Event, EventHandler};
-use super::glitter_verbs::{elapsed_ms_since, get_glitter_verb};
+use super::glitter_verbs::get_glitter_verb;
 
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
@@ -93,7 +93,6 @@ pub async fn run_minimal_tui(mut agent_loop: AgentLoop, config: &Config) -> anyh
 }
 
 /// Main event loop.
-#[allow(clippy::too_many_arguments)]
 async fn run_loop(
     terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
@@ -623,7 +622,6 @@ fn maybe_nudge_if_slow(app: &mut App) {
     app.last_nudge_sec = elapsed as u32;
 
     // Update verb with glitter verb for long wait
-    let elapsed_ms = elapsed as u128 * 1000;
     app.verb = get_glitter_verb(true, app.iteration, &[], app.run_started_at);
 
     app.chat_history.push(ChatEntry::TranscriptLine(format!(

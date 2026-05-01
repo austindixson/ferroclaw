@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Tool completion
         let event = WsEvent::tool_update(
             call_id,
-            if counter % 3 == 0 {
+            if counter.is_multiple_of(3) {
                 ToolState::Failed
             } else {
                 ToolState::Completed

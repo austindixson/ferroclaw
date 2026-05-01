@@ -2,9 +2,6 @@
 //!
 //! Nyx-inspired transcript: real-time tool lines, dark palette, teal accents.
 
-#[path = "orchestrator_ui.rs"]
-mod orchestrator_ui;
-
 use super::app::{App, ChatEntry};
 use super::events::{Event, EventHandler};
 use crate::agent::AgentLoop;
@@ -12,7 +9,7 @@ use crate::agent::r#loop::AgentEvent;
 use crate::config::Config;
 use crate::types::Message;
 
-use orchestrator_ui::draw as draw_orchestrator;
+use super::orchestrator_ui::draw as draw_orchestrator;
 
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
@@ -167,7 +164,7 @@ fn run_loop(
 
                     terminal.draw(|frame| draw_orchestrator(frame, app))?;
 
-                    let mut hist = std::mem::replace(history, Vec::new());
+                    let mut hist = std::mem::take(history);
                     let (tx, rx) = mpsc::channel::<AgentEvent>();
                     let input_for_agent = input;
                     let th = std::thread::spawn(move || {
@@ -466,7 +463,7 @@ fn maybe_long_wait_nudge(app: &mut App) {
     if sec < 30 {
         return;
     }
-    if sec % 30 != 0 {
+    if !sec.is_multiple_of(30) {
         return;
     }
     if app.last_nudge_sec == sec {

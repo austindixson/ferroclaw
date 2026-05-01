@@ -306,27 +306,27 @@ fn find_python_bugs(content: &str, bug_type: &str) -> Result<String, FerroError>
         }
 
         // Memory bugs
-        if bug_type == "all" || bug_type == "memory" {
-            if line.contains("list.append(") && !line.contains("//") {
-                let in_loop = lines
-                    .get(line_num.saturating_sub(1).saturating_sub(5)..=line_num)
-                    .map(|lines| {
-                        lines
-                            .iter()
-                            .any(|l| l.contains("for ") || l.contains("while "))
-                    })
-                    .unwrap_or(false);
+        if (bug_type == "all" || bug_type == "memory")
+            && line.contains("list.append(") && !line.contains("//")
+        {
+            let in_loop = lines
+                .get(line_num.saturating_sub(1).saturating_sub(5)..=line_num)
+                .map(|lines| {
+                    lines
+                        .iter()
+                        .any(|l| l.contains("for ") || l.contains("while "))
+                })
+                .unwrap_or(false);
 
-                if in_loop {
-                    bugs.push(BugReport {
-                        line: line_num + 1,
-                        bug_type: "memory".into(),
-                        severity: "low".into(),
-                        title: "List reallocation in loop".into(),
-                        description: "Consider pre-allocating list with known size or using list comprehension.".into(),
-                        code: line.to_string(),
-                    });
-                }
+            if in_loop {
+                bugs.push(BugReport {
+                    line: line_num + 1,
+                    bug_type: "memory".into(),
+                    severity: "low".into(),
+                    title: "List reallocation in loop".into(),
+                    description: "Consider pre-allocating list with known size or using list comprehension.".into(),
+                    code: line.to_string(),
+                });
             }
         }
     }
@@ -408,18 +408,18 @@ fn find_javascript_bugs(content: &str, bug_type: &str) -> Result<String, FerroEr
         }
 
         // Memory bugs
-        if bug_type == "all" || bug_type == "memory" {
-            if line.contains("Array(") && !line.contains("//") {
-                bugs.push(BugReport {
-                    line: line_num + 1,
-                    bug_type: "memory".into(),
-                    severity: "low".into(),
-                    title: "Array constructor".into(),
-                    description: "Use array literal [] instead of Array() for better performance."
-                        .into(),
-                    code: line.to_string(),
-                });
-            }
+        if (bug_type == "all" || bug_type == "memory")
+            && line.contains("Array(") && !line.contains("//")
+        {
+            bugs.push(BugReport {
+                line: line_num + 1,
+                bug_type: "memory".into(),
+                severity: "low".into(),
+                title: "Array constructor".into(),
+                description: "Use array literal [] instead of Array() for better performance."
+                    .into(),
+                code: line.to_string(),
+            });
         }
     }
 
@@ -500,9 +500,7 @@ fn format_bugs_report(
     output.push_str("💡 Recommendations:\n");
     output.push_str("  - Address high-severity bugs first\n");
     output.push_str("  - Run language-specific static analysis tools\n");
-    output.push_str(&format!(
-        "  - Use security-focused tools like bandit (Python), cargo-audit (Rust)\n"
-    ));
+    output.push_str("  - Use security-focused tools like bandit (Python), cargo-audit (Rust)\n");
 
     Ok(output)
 }

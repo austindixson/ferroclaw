@@ -24,7 +24,7 @@ use crate::types::Message;
 
 use super::app::{App, ChatEntry};
 use super::events::{Event, EventHandler};
-use super::glitter_verbs::{elapsed_ms_since, get_glitter_verb};
+use super::glitter_verbs::get_glitter_verb;
 
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
@@ -43,6 +43,7 @@ use std::io;
 use std::time::Instant;
 
 /// Kinetic TUI configuration
+#[allow(dead_code)]
 const PROGRESS_BAR_WIDTH: u16 = 20;
 #[allow(dead_code)]
 const PROGRESS_UPDATE_INTERVAL_MS: u64 = 100;
@@ -248,7 +249,7 @@ async fn run_loop(
 
 /// Update kinetic state (animations, progress bars)
 #[allow(dead_code)]
-fn update_kinetic_state(app: &mut App) {
+fn update_kinetic_state(_app: &mut App) {
     // This would be called every tick to update animations
     // For now, placeholder for future animation logic
 }
@@ -360,6 +361,7 @@ fn draw_glitter_verb(frame: &mut Frame, app: &App, area: Rect, _frame_count: u64
 }
 
 /// Content area: chat history + input.
+#[allow(dead_code)]
 fn draw_content(frame: &mut Frame, app: &App, area: Rect, frame_count: u64) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)

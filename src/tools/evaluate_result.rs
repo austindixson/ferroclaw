@@ -88,7 +88,7 @@ fn perform_evaluation(
     for line in success_criteria.lines() {
         output.push_str(&format!("  • {}\n", line));
     }
-    output.push_str("\n");
+    output.push('\n');
 
     output.push_str("📤 Result:\n");
     for line in result.lines().take(10) {
@@ -100,7 +100,7 @@ fn perform_evaluation(
             result.lines().count() - 10
         ));
     } else {
-        output.push_str("\n");
+        output.push('\n');
     }
 
     // Analyze success criteria
@@ -163,7 +163,7 @@ fn perform_evaluation(
         for criterion in &met_criteria {
             output.push_str(&format!("  • {}\n", criterion));
         }
-        output.push_str("\n");
+        output.push('\n');
     }
 
     if !unmet_criteria.is_empty() {
@@ -171,7 +171,7 @@ fn perform_evaluation(
         for criterion in &unmet_criteria {
             output.push_str(&format!("  • {}\n", criterion));
         }
-        output.push_str("\n");
+        output.push('\n');
     }
 
     // Metrics evaluation if provided
@@ -183,30 +183,30 @@ fn perform_evaluation(
                     ("performance", Value::String(perf)) => {
                         output.push_str(&format!("  Performance: {}\n", perf));
                         if perf.contains("slow") || perf.contains("timeout") {
-                            output.push_str(&format!("    ⚠️  Performance issues detected\n"));
+                            output.push_str("    ⚠️  Performance issues detected\n");
                         } else if perf.contains("fast") || perf.contains("good") {
-                            output.push_str(&format!("    ✅ Performance is good\n"));
+                            output.push_str("    ✅ Performance is good\n");
                         }
                     }
                     ("quality", Value::Number(quality)) => {
                         let q = quality.as_f64().unwrap_or(0.0);
                         output.push_str(&format!("  Quality Score: {:.1}/100\n", q));
                         if q >= 90.0 {
-                            output.push_str(&format!("    ✅ Excellent quality\n"));
+                            output.push_str("    ✅ Excellent quality\n");
                         } else if q >= 70.0 {
                             output
-                                .push_str(&format!("    ⚠️  Good quality, room for improvement\n"));
+                                .push_str("    ⚠️  Good quality, room for improvement\n");
                         } else {
-                            output.push_str(&format!("    ❌ Poor quality, needs improvement\n"));
+                            output.push_str("    ❌ Poor quality, needs improvement\n");
                         }
                     }
                     ("errors", Value::Number(errors)) => {
                         let e = errors.as_i64().unwrap_or(0);
                         output.push_str(&format!("  Errors: {}\n", e));
                         if e == 0 {
-                            output.push_str(&format!("    ✅ No errors\n"));
+                            output.push_str("    ✅ No errors\n");
                         } else {
-                            output.push_str(&format!("    ❌ Errors detected\n"));
+                            output.push_str("    ❌ Errors detected\n");
                         }
                     }
                     _ => {
@@ -215,7 +215,7 @@ fn perform_evaluation(
                 }
             }
         }
-        output.push_str("\n");
+        output.push('\n');
     }
 
     // Recommendations

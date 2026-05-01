@@ -23,39 +23,38 @@ impl ChannelRouter {
         let mut channels: HashMap<String, Arc<dyn Channel>> = HashMap::new();
 
         // Telegram (from existing config)
-        if let Some(ref tg_config) = config.telegram {
-            if let Some(bot) = crate::telegram::TelegramBot::from_config(tg_config) {
-                tracing::info!("Telegram channel configured");
-                channels.insert(
-                    "telegram".into(),
-                    Arc::new(TelegramChannelAdapter(Arc::new(bot))),
-                );
-            }
+        if let Some(ref tg_config) = config.telegram
+            && let Some(bot) = crate::telegram::TelegramBot::from_config(tg_config)
+        {
+            tracing::info!("Telegram channel configured");
+            channels.insert(
+                "telegram".into(),
+                Arc::new(TelegramChannelAdapter(Arc::new(bot))),
+            );
         }
 
         // Discord
-        if let Some(ref discord_config) = config.channels.discord {
-            if let Some(ch) = crate::channels::discord::DiscordChannel::from_config(discord_config)
-            {
-                tracing::info!("Discord channel configured");
-                channels.insert("discord".into(), Arc::new(ch));
-            }
+        if let Some(ref discord_config) = config.channels.discord
+            && let Some(ch) = crate::channels::discord::DiscordChannel::from_config(discord_config)
+        {
+            tracing::info!("Discord channel configured");
+            channels.insert("discord".into(), Arc::new(ch));
         }
 
         // Slack
-        if let Some(ref slack_config) = config.channels.slack {
-            if let Some(ch) = crate::channels::slack::SlackChannel::from_config(slack_config) {
-                tracing::info!("Slack channel configured");
-                channels.insert("slack".into(), Arc::new(ch));
-            }
+        if let Some(ref slack_config) = config.channels.slack
+            && let Some(ch) = crate::channels::slack::SlackChannel::from_config(slack_config)
+        {
+            tracing::info!("Slack channel configured");
+            channels.insert("slack".into(), Arc::new(ch));
         }
 
         // WhatsApp
-        if let Some(ref wa_config) = config.channels.whatsapp {
-            if let Some(ch) = crate::channels::whatsapp::WhatsAppChannel::from_config(wa_config) {
-                tracing::info!("WhatsApp channel configured");
-                channels.insert("whatsapp".into(), Arc::new(ch));
-            }
+        if let Some(ref wa_config) = config.channels.whatsapp
+            && let Some(ch) = crate::channels::whatsapp::WhatsAppChannel::from_config(wa_config)
+        {
+            tracing::info!("WhatsApp channel configured");
+            channels.insert("whatsapp".into(), Arc::new(ch));
         }
 
         // Signal
@@ -66,21 +65,20 @@ impl ChannelRouter {
         }
 
         // Email
-        if let Some(ref email_config) = config.channels.email {
-            if let Some(ch) = crate::channels::email::EmailChannel::from_config(email_config) {
-                tracing::info!("Email channel configured");
-                channels.insert("email".into(), Arc::new(ch));
-            }
+        if let Some(ref email_config) = config.channels.email
+            && let Some(ch) = crate::channels::email::EmailChannel::from_config(email_config)
+        {
+            tracing::info!("Email channel configured");
+            channels.insert("email".into(), Arc::new(ch));
         }
 
         // Home Assistant
-        if let Some(ref ha_config) = config.channels.homeassistant {
-            if let Some(ch) =
+        if let Some(ref ha_config) = config.channels.homeassistant
+            && let Some(ch) =
                 crate::channels::homeassistant::HomeAssistantChannel::from_config(ha_config)
-            {
-                tracing::info!("Home Assistant channel configured");
-                channels.insert("homeassistant".into(), Arc::new(ch));
-            }
+        {
+            tracing::info!("Home Assistant channel configured");
+            channels.insert("homeassistant".into(), Arc::new(ch));
         }
 
         let message_counts = channels.keys().map(|k| (k.clone(), 0u64)).collect();
