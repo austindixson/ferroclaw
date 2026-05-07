@@ -1671,6 +1671,9 @@ fn apply_agent_event(app: &mut App, event: &AgentEvent) {
                 name: name.clone(),
                 args: String::new(),
             });
+            app.chat_history.push(ChatEntry::TranscriptLine(format!(
+                "◦ reason: running {name}"
+            )));
             app.iteration += 1;
             app.tool_call_count = app.tool_call_count.saturating_add(1);
             app.add_active_tool(name.clone());
@@ -1680,6 +1683,8 @@ fn apply_agent_event(app: &mut App, event: &AgentEvent) {
             app.chat_history.push(ChatEntry::TranscriptLine(format!(
                 "⋯ thinking (round {iteration})"
             )));
+            app.chat_history
+                .push(ChatEntry::TranscriptLine("◦ reason: evaluating next step".to_string()));
             let elapsed = elapsed_ms_since(app.run_started_at);
             app.verb = glitter_verb_for_llm_pending(elapsed, *iteration);
         }
@@ -1689,11 +1694,22 @@ fn apply_agent_event(app: &mut App, event: &AgentEvent) {
                     "◆ model selected tools: {}",
                     names.join(", ")
                 )));
+                let brief = if names.len() > 3 {
+                    format!("{}, +{}", names[..3].join(", "), names.len() - 3)
+                } else {
+                    names.join(", ")
+                };
+                app.chat_history.push(ChatEntry::TranscriptLine(format!(
+                    "◦ reason: selected tools for required action ({brief})"
+                )));
             }
         }
         AgentEvent::ParallelToolBatch { count } => {
             app.chat_history.push(ChatEntry::TranscriptLine(format!(
                 "◆ parallel tool batch: {count}"
+            )));
+            app.chat_history.push(ChatEntry::TranscriptLine(format!(
+                "◦ reason: parallelized {count} tool call(s)"
             )));
         }
         AgentEvent::ToolResult {
@@ -1707,6 +1723,11 @@ fn apply_agent_event(app: &mut App, event: &AgentEvent) {
                 content: content.clone(),
                 is_error: *is_error,
             });
+            app.chat_history.push(ChatEntry::TranscriptLine(format!(
+                "◦ reason: {} returned {}; deciding next step",
+                name,
+                if *is_error { "error" } else { "result" }
+            )));
             app.remove_active_tool(name);
             let elapsed = elapsed_ms_since(app.run_started_at);
             app.verb = glitter_verb_for_llm_pending(elapsed, app.iteration);

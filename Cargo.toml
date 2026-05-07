@@ -1,6 +1,6 @@
 [package]
 name = "ferroclaw"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A security-first, lightweight AI agent with native MCP and DietMCP compression"
 license = "MIT"

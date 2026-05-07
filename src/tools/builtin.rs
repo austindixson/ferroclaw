@@ -123,6 +123,10 @@ pub fn register_builtin_tools(registry: &mut ToolRegistry, memory: Arc<Mutex<Mem
                         "command": {
                             "type": "string",
                             "description": "The bash command to execute"
+                        },
+                        "background": {
+                            "type": "boolean",
+                            "description": "Run command in background and return immediately with PID/log path"
                         }
                     },
                     "required": ["command"]
@@ -422,6 +426,26 @@ impl ToolHandler for ListDirectoryHandler {
 }
 
 struct BashHandler;
+
+fn looks_like_long_running_server(command: &str) -> bool {
+    let c = command.to_lowercase();
+    let hints = [
+        "npm run dev",
+        "pnpm dev",
+        "yarn dev",
+        "vite",
+        "next dev",
+        "python -m http.server",
+        "uvicorn",
+        "flask run",
+        "rails server",
+        "cargo run",
+        "docker compose up",
+        "serve ",
+    ];
+    hints.iter().any(|h| c.contains(h))
+}
+
 impl ToolHandler for BashHandler {
     fn call<'a>(&'a self, call_id: &'a str, arguments: &'a Value) -> ToolFuture<'a> {
         Box::pin(async move {
@@ -429,6 +453,49 @@ impl ToolHandler for BashHandler {
                 .get("command")
                 .and_then(|c| c.as_str())
                 .ok_or_else(|| FerroError::Tool("Missing 'command' argument".into()))?;
+            let requested_background = arguments
+                .get("background")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            let should_background = requested_background || looks_like_long_running_server(command);
+
+            if should_background {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let log_dir = std::path::PathBuf::from("/tmp/ferroclaw-bg");
+                tokio::fs::create_dir_all(&log_dir)
+                    .await
+                    .map_err(|e| FerroError::Tool(format!("Failed to create bg log dir: {e}")))?;
+                let log_path = log_dir.join(format!("{call_id}-{ts}.log"));
+                let wrapped = format!(
+                    "nohup bash -lc {} > {} 2>&1 & echo $!",
+                    serde_json::to_string(command)
+                        .map_err(|e| FerroError::Tool(format!("Failed to quote command: {e}")))?,
+                    serde_json::to_string(log_path.to_string_lossy().as_ref())
+                        .map_err(|e| FerroError::Tool(format!("Failed to quote log path: {e}")))?
+                );
+                let output = tokio::process::Command::new("bash")
+                    .arg("-lc")
+                    .arg(wrapped)
+                    .output()
+                    .await
+                    .map_err(|e| FerroError::Tool(format!("Failed to start background command: {e}")))?;
+                let pid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let content = format!(
+                    "Background process started.\npid: {}\nlog: {}\nstop: kill {}\nstatus: ps -p {} -o pid=,ppid=,stat=,etime=,command=\n",
+                    pid,
+                    log_path.display(),
+                    pid,
+                    pid
+                );
+                return Ok(ToolResult {
+                    call_id: call_id.to_string(),
+                    content,
+                    is_error: pid.is_empty(),
+                });
+            }
 
             let output = tokio::process::Command::new("bash")
                 .arg("-c")

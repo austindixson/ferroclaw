@@ -705,13 +705,22 @@ impl LlmProvider for OpenAiProvider {
 
             for attempt in 1..=max_attempts {
                 self.enforce_nvidia_nim_rate_limit().await;
-                let response = match self
+                let mut req = self
                     .client
                     .post(&url)
                     .header("Authorization", format!("Bearer {}", self.api_key))
                     .header("Content-Type", "application/json")
+                    // Some Codex/OAuth backends intermittently emit malformed compressed SSE bodies.
+                    // For streaming responses, request identity encoding to avoid decode-body failures.
+                    .header("Accept-Encoding", "identity")
                     .timeout(tokio::time::Duration::from_millis(self.request_timeout_ms))
-                    .json(&body)
+                    .json(&body);
+
+                if self.api_mode == OpenAiApiMode::CodexResponses {
+                    req = req.header("Accept", "text/event-stream");
+                }
+
+                let response = match req
                     .send()
                     .await
                 {
@@ -741,9 +750,23 @@ impl LlmProvider for OpenAiProvider {
                 };
 
                 let (response_body, error_msg) = if self.api_mode == OpenAiApiMode::CodexResponses {
-                    let raw = response.text().await.map_err(|e| {
-                        FerroError::Provider(format!("Failed to read codex stream: {e}"))
-                    })?;
+                    let raw = match response.text().await {
+                        Ok(raw) => raw,
+                        Err(e) => {
+                            let ferr = FerroError::Provider(format!(
+                                "Failed to read codex stream (attempt {attempt}/{max_attempts}, status {status}): {e}"
+                            ));
+                            if attempt < max_attempts {
+                                last_err = Some(ferr);
+                                tokio::time::sleep(tokio::time::Duration::from_millis(
+                                    250 * attempt as u64,
+                                ))
+                                .await;
+                                continue;
+                            }
+                            return Err(ferr);
+                        }
+                    };
 
                     if !status.is_success() {
                         (None, Some(Self::parse_error_message_from_jsonish(&raw)))
