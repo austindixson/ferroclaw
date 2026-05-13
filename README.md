@@ -2,6 +2,46 @@
 
 Security-first single-binary Rust agent framework.
 
+## Presentation Framework (Proven README Pattern)
+
+### TL;DR
+Security-first Rust agent framework with native MCP support and robust test coverage.
+
+### Why this project
+- Solves a concrete workflow problem with reproducible command paths.
+- Prioritizes operator reliability over demo-only output.
+- Structured for practical use, not just conceptual documentation.
+
+### Quick Start
+```bash
+cargo run --release
+```
+
+### Installation
+```bash
+rustup default stable
+cargo build --release
+```
+
+### Usage Examples
+```bash
+cargo run --release -- --help
+cargo test --all
+```
+
+### Architecture at a glance
+- src/main.rs — CLI entrypoint
+- src/lib.rs — shared core modules
+- tests/ + benches/ — correctness and performance validation
+
+### Troubleshooting
+- If build fails after updates: `cargo clean && cargo build --release`.
+- If provider calls fail, validate required API keys and provider config.
+
+### Project status
+Hardened reliability + security posture with CI-gated quality checks.
+
+
 ## Installation
 
 ```bash
@@ -62,3 +102,11 @@ cargo test --all
 
 ## Limits
 Provider/tool parity remains an ongoing engineering target.
+
+## Contributing
+
+Contributions are welcome. Open an issue first for significant changes, then submit a focused PR with reproducible validation steps.
+
+## License
+
+See `LICENSE` for terms.
