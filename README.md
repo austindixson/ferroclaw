@@ -16,15 +16,5 @@ Provider/tool parity remains an ongoing engineering target.
 
 ## Visual Overview
 
-![Install flow](docs/assets/install-flow.png)
-
-![Setup flow](docs/assets/setup-flow.png)
-
-To regenerate these visuals:
-
-```bash
-cd docs/remotion
-npm install
-npm run render:all
-```
+![ferroclaw visual overview](docs/assets/visual-overview-ferroclaw.svg)
 
