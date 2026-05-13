@@ -4,81 +4,47 @@ Security-first single-binary Rust agent framework.
 
 ## Installation
 
-1) Install Rust toolchain
 ```bash
-curl https://sh.rustup.rs -sSf | sh
 rustup default stable
-```
-
-
-2) Clone and enter the repo
-```bash
-git clone <repo-url>
-cd <repo-name>
+cargo build --release
 ```
 
 ## Quick Start
 
 ```bash
-cargo build --release
+cargo run --release -- --help
 cargo run --release
 ```
 
 ## Usage Examples
 
-- Run locally
-```bash
-cargo run --release
-```
-
-- Build production artifacts
-```bash
-cargo build --release
-```
-
-- Run tests
+- Run full test suite
 ```bash
 cargo test --all
 ```
 
-- Launch CLI help
+- Run one test module with output
 ```bash
-cargo run -- --help
+cargo test memory_store -- --nocapture
+```
+
+- Build optimized binary
+```bash
+cargo build --release
 ```
 
 ## Implementation Overview
 
-This repository is implemented primarily in **Rust** and organized around explicit runtime entrypoints plus supporting modules.
-
-### Key Directories
-
-- `.ecc-design/`
-- `.github/`
-- `benches/`
-- `docs/`
-- `evals/`
-- `examples/`
-- `scripts/`
-- `src/`
-
-### Key Files
-
-- `Cargo.toml`
-- `README.md`
-- `LICENSE`
-- `.github/workflows/ci.yml`
-
-### Entrypoints
-
-- `src/main.rs`
-- `src/lib.rs`
+- `src/main.rs` is the primary CLI entrypoint.
+- `src/lib.rs` exposes shared internal modules used across command paths.
+- `tests/` and `benches/` cover correctness and performance-critical behavior.
+- `.github/workflows/ci.yml` defines CI validation gates.
 
 ## Troubleshooting
 
-- If startup fails, run the primary command with verbose flags and capture stderr logs.
-- If dependencies conflict, remove lock artifacts and reinstall in a clean shell.
-- If tests fail intermittently, run a single test target first, then full suite.
-- Ensure environment variables are loaded before running build/train commands.
+- If build fails after dependency updates, run `cargo clean && cargo build --release`.
+- If model/provider commands fail, verify required API keys in your environment before launch.
+- If behavior diverges between local and CI, run `cargo test --all` on a clean tree.
 
 ## Visual Overview
 
