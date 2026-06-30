@@ -1,6 +1,10 @@
 //! Hermes-style chat TUI implementation for Ferroclaw.
 
 use crate::tui::app::{App, ChatEntry};
+use crate::tui::live_panels::{
+    style_trace_line, tail_diff_rows, tail_trace_rows, DIFF_PANEL_LINES, THINKING_PANEL_LINES,
+};
+use crate::tui::app::ChatViewport;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -47,7 +51,49 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ])
         .split(viewport);
 
-    draw_chat(frame, app, chunks[0]);
+    let show_thinking = app.thinking_live;
+    let show_diff = !app.diff_panel.is_empty();
+
+    if show_thinking || show_diff {
+        let mut main_constraints = vec![Constraint::Min(3)];
+        if show_thinking {
+            main_constraints.push(Constraint::Length(THINKING_PANEL_LINES.saturating_add(2)));
+        }
+        if show_diff {
+            main_constraints.push(Constraint::Length(DIFF_PANEL_LINES.saturating_add(2)));
+        }
+        let main = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(main_constraints)
+            .split(chunks[0]);
+
+        let mut idx = 0;
+        draw_chat(frame, app, main[idx]);
+        idx += 1;
+        if show_thinking {
+            draw_live_snippet_panel(
+                frame,
+                &format!("thinking · {}", app.verb),
+                main[idx],
+                &app.trace_panel,
+                THINKING_PANEL_LINES as usize,
+                true,
+            );
+            idx += 1;
+        }
+        if show_diff {
+            draw_live_snippet_panel(
+                frame,
+                "diff",
+                main[idx],
+                &app.diff_panel,
+                DIFF_PANEL_LINES as usize,
+                false,
+            );
+        }
+    } else {
+        draw_chat(frame, app, chunks[0]);
+    }
     draw_status_bar(frame, app, chunks[1]);
     draw_input(frame, app, chunks[2]);
 
@@ -174,8 +220,53 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(status, status_row);
 }
 
+fn draw_live_snippet_panel(
+    frame: &mut Frame,
+    title: &str,
+    area: Rect,
+    buffer: &crate::tui::live_panels::LiveSnippetBuffer,
+    max_rows: usize,
+    trace_style: bool,
+) {
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let mut rows = if trace_style {
+        tail_trace_rows(buffer, inner_width, max_rows)
+    } else {
+        tail_diff_rows(buffer, inner_width, max_rows)
+    };
+    if trace_style && rows.is_empty() {
+        rows.push(Line::from(Span::styled(
+            "… waiting for model / tools",
+            Style::default()
+                .fg(Color::Rgb(120, 138, 168))
+                .add_modifier(Modifier::DIM),
+        )));
+    }
+
+    let lines = rows;
+
+    let panel = Paragraph::new(Text::from(lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {title} "))
+                .border_style(Style::default().fg(BORDER)),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(panel, area);
+}
+
 /// Hermes-style chat history with message bubbles.
 fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.thought_toggle_hits.clear();
+    app.chat_area = ChatViewport {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: area.height,
+    };
+
     if app.chat_history.len() > MAX_CHAT_ENTRIES {
         let drop_n = app.chat_history.len() - MAX_CHAT_ENTRIES;
         app.chat_history.drain(0..drop_n);
@@ -197,7 +288,7 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     )));
     lines.push(Line::from(""));
 
-    for entry in &app.chat_history {
+    for (entry_idx, entry) in app.chat_history.iter().enumerate() {
         match entry {
             ChatEntry::TranscriptLine(s) => {
                 lines.push(Line::from(Span::styled(
@@ -303,7 +394,7 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
                 )));
                 lines.push(Line::from(""));
             }
-            ChatEntry::ToolCall { name, args: _ } => {
+            ChatEntry::ToolCall { name, args } => {
                 lines.push(Line::from(vec![
                     Span::styled(
                         "◆ tool call: ",
@@ -316,6 +407,15 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
                             .add_modifier(Modifier::BOLD),
                     ),
                 ]));
+                if !args.is_empty() {
+                    let wrap_width = inner_width.saturating_sub(4).max(1);
+                    for seg in wrap_to_width(args, wrap_width) {
+                        lines.push(Line::from(Span::styled(
+                            format!("    {seg}"),
+                            Style::default().fg(Color::Rgb(202, 178, 116)),
+                        )));
+                    }
+                }
             }
             ChatEntry::ToolResult {
                 name,
@@ -390,16 +490,55 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
                     Span::styled(text, Style::default().fg(Color::Rgb(255, 130, 130))),
                 ]));
             }
+            ChatEntry::Thought {
+                duration_secs,
+                lines: thought_lines,
+                expanded,
+            } => {
+                let chevron = if *expanded { "▾" } else { "▸" };
+                let summary = format!("{chevron} Thought · {duration_secs}s");
+                let logical = lines.len() as u16;
+                app.thought_toggle_hits.push((logical, entry_idx));
+                let mut spans = vec![Span::styled(
+                    summary,
+                    Style::default()
+                        .fg(MUTED)
+                        .add_modifier(Modifier::DIM),
+                )];
+                if !*expanded {
+                    spans.push(Span::styled(
+                        "  (click to expand)",
+                        Style::default().fg(MUTED),
+                    ));
+                }
+                lines.push(Line::from(spans));
+                if *expanded {
+                    for raw in thought_lines {
+                        for seg in wrap_to_width(raw, inner_width.max(1)) {
+                            lines.push(style_trace_line(&seg));
+                        }
+                    }
+                }
+                lines.push(Line::from(""));
+            }
         }
     }
 
     // Bottom-anchor short transcripts so new chat appears near the composer.
     let visible = area.height as usize;
-    if visible > 0 && lines.len() < visible {
+    let pad = if visible > 0 && lines.len() < visible {
+        visible - lines.len()
+    } else {
+        0
+    };
+    if pad > 0 {
         let mut padded = Vec::with_capacity(visible);
-        padded.extend(std::iter::repeat_n(Line::from(""), visible - lines.len()));
+        padded.extend(std::iter::repeat_n(Line::from(""), pad));
         padded.extend(lines);
         lines = padded;
+        for (logical, _) in &mut app.thought_toggle_hits {
+            *logical += pad as u16;
+        }
     }
 
     app.total_chat_lines = lines.len() as u16;
@@ -414,6 +553,7 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         0
     };
+    app.chat_scroll_top = scroll;
 
     let chat = Paragraph::new(Text::from(lines))
         .wrap(Wrap { trim: false })

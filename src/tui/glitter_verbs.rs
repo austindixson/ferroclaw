@@ -309,7 +309,13 @@ const TOOL_ACTION_VERBS: &[&str] = &[
     "Wolverine-adamantiuming",
 ];
 
-/// Time bucket for cycling through verbs (milliseconds).
+const LLM_ROUND_VERBS: &[&str] = &[
+    "Calling model",
+    "Waiting on model",
+    "Model thinking",
+];
+
+/// Time bucket for cycling through verbs (milliseconds) — legacy; avoid using on Tick.
 const LLM_PENDING_BUCKET_MS: u64 = 2200;
 
 fn stable_hash(name: &str) -> usize {
@@ -322,6 +328,12 @@ pub fn shimmer_wrap(text: &str, phase: usize) -> String {
     let left = SHIMMER_GLYPHS[phase % SHIMMER_GLYPHS.len()];
     let right = SHIMMER_GLYPHS[(phase + 3) % SHIMMER_GLYPHS.len()];
     format!("{left} {text} {right}")
+}
+
+/// Status verb when waiting on the model for a given round (stable until next event).
+pub fn verb_for_llm_round(iteration: u32) -> String {
+    let idx = iteration.saturating_sub(1) as usize % LLM_ROUND_VERBS.len();
+    format!("{}…", LLM_ROUND_VERBS[idx])
 }
 
 /// Get an LLM pending verb based on elapsed time and iteration.

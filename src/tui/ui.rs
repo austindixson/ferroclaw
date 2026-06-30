@@ -269,6 +269,13 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
                     Span::styled(text, Style::default().fg(Color::Red)),
                 ]));
             }
+            ChatEntry::Thought { duration_secs, expanded, .. } => {
+                let chevron = if *expanded { "▾" } else { "▸" };
+                lines.push(Line::from(Span::styled(
+                    format!("{chevron} Thought · {duration_secs}s"),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
         }
         lines.push(Line::from("")); // Blank line between entries
     }

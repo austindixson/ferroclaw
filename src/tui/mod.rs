@@ -13,12 +13,15 @@
 
 pub mod app;
 pub mod colors;
+pub mod composer;
 pub mod events;
 pub mod glitter_verbs;
 pub mod hermes_tui;
 pub mod hermes_ui;
 pub mod kinetic_tui;
+pub mod live_panels;
 pub mod minimal_tui;
+pub mod model_select;
 pub mod orchestrator_tui;
 pub mod orchestrator_ui;
 pub mod thinking_indicator;
@@ -105,6 +108,7 @@ async fn run_loop(
                 app.scroll_up(3);
                 continue;
             }
+            Event::MouseClick(_, _) => {}
             Event::MouseScrollDown => {
                 app.scroll_down(3);
                 continue;

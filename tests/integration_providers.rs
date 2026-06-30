@@ -62,11 +62,106 @@ fn test_routing_priority_openrouter_second() {
     let config = Config::default();
     let result = providers::resolve_provider("openai/gpt-4o", &config);
     match result {
-        Ok(_) => panic!("Expected error for unconfigured OpenRouter provider"),
-        Err(e) => assert!(
-            e.to_string().contains("OpenRouter"),
-            "Expected OpenRouter error, got: {e}"
+        Ok(_) => panic!("Expected error for unconfigured slash-format provider"),
+        Err(e) => {
+            let err = e.to_string();
+            assert!(
+                err.contains("OpenRouter") || err.contains("NVIDIA"),
+                "Expected slash-format provider error, got: {err}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_routing_google_slash_model_to_nvidia_nim() {
+    use ferroclaw::config::OpenAiConfig;
+
+    let mut config = Config::default();
+    config.providers.openrouter = None;
+    config.providers.nvidia = Some(OpenAiConfig {
+        api_key_env: "NVIDIA_API_KEY".into(),
+        base_url: "https://integrate.api.nvidia.com/v1".into(),
+        ..Default::default()
+    });
+
+    unsafe {
+        std::env::set_var("NVIDIA_API_KEY", "test-nvidia-key");
+    }
+
+    let result = providers::resolve_provider("google/gemma-4-31b-it", &config);
+    match result {
+        Ok(p) => {
+            assert_eq!(p.name(), "openai");
+            assert_eq!(
+                providers::resolved_backend_label("google/gemma-4-31b-it", &config),
+                "nvidia-nim"
+            );
+        }
+        Err(e) => panic!("google/ model should route to NVIDIA NIM, got: {e}"),
+    }
+}
+
+#[test]
+fn test_routing_nvidia_nim_when_openrouter_not_configured() {
+    use ferroclaw::config::OpenAiConfig;
+
+    let mut config = Config::default();
+    config.providers.openrouter = None;
+    config.providers.nvidia = Some(OpenAiConfig {
+        api_key_env: "NVIDIA_API_KEY".into(),
+        base_url: "https://integrate.api.nvidia.com/v1".into(),
+        ..Default::default()
+    });
+
+    let result = providers::resolve_provider("google/gemma-4-31b-it", &config);
+    match result {
+        Ok(p) => assert_eq!(p.name(), "openai"),
+        Err(e) => {
+            let err = e.to_string();
+            assert!(
+                !err.contains("OpenRouter"),
+                "slash model must not require OpenRouter when NVIDIA is configured, got: {err}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_routing_nvidia_preferred_over_openrouter_for_slash_models() {
+    use ferroclaw::config::{OpenAiConfig, OpenRouterConfig};
+
+    let mut config = Config::default();
+    config.providers.openrouter = Some(OpenRouterConfig {
+        api_key_env: "OPENROUTER_API_KEY".into(),
+        base_url: "https://openrouter.ai/api/v1".into(),
+        site_url: None,
+        site_name: None,
+        max_tokens: 8192,
+        request_timeout_ms: 120_000,
+        max_retries: 2,
+        no_retry_max_tokens_threshold: 128,
+    });
+    config.providers.nvidia = Some(OpenAiConfig {
+        api_key_env: "NVIDIA_API_KEY".into(),
+        base_url: "https://integrate.api.nvidia.com/v1".into(),
+        ..Default::default()
+    });
+
+    // SAFETY: single-threaded test; keys are fake placeholders.
+    unsafe {
+        std::env::set_var("NVIDIA_API_KEY", "test-nvidia-key");
+        std::env::set_var("OPENROUTER_API_KEY", "test-openrouter-key");
+    }
+
+    let result = providers::resolve_provider("google/gemma-4-31b-it", &config);
+    match result {
+        Ok(p) => assert_eq!(
+            p.name(),
+            "openai",
+            "slash-format models should route to NVIDIA NIM when both providers are configured"
         ),
+        Err(e) => panic!("expected NVIDIA routing, got: {e}"),
     }
 }
 

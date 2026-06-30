@@ -2,6 +2,24 @@
 
 use std::time::Instant;
 
+/// Screen rectangle for chat hit-testing (x, y, width, height).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChatViewport {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl ChatViewport {
+    pub fn contains(&self, row: u16, col: u16) -> bool {
+        row >= self.y
+            && col >= self.x
+            && row < self.y.saturating_add(self.height)
+            && col < self.x.saturating_add(self.width)
+    }
+}
+
 /// Status of a task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
@@ -56,6 +74,12 @@ pub enum ChatEntry {
     SystemInfo(String),
     /// An error message.
     Error(String),
+    /// Collapsed reasoning trace (expandable); shown after thinking completes.
+    Thought {
+        duration_secs: u32,
+        lines: Vec<String>,
+        expanded: bool,
+    },
 }
 
 /// Holds all TUI state.
@@ -121,6 +145,24 @@ pub struct App {
     pub shimmer_phase: usize,
     /// Latest discovered SKILL.md count for top-of-chat info panel.
     pub discovered_skills_count: usize,
+    /// Live thinking/reasoning trace (fixed-height panel, tail-follow).
+    pub trace_panel: crate::tui::live_panels::LiveSnippetBuffer,
+    /// Live diff output (fixed-height panel, tail-follow).
+    pub diff_panel: crate::tui::live_panels::LiveSnippetBuffer,
+    /// Live trace panel visible only while the model is still "thinking".
+    pub thinking_live: bool,
+    /// When the current thought block started (for duration label).
+    pub thought_started_at: Option<Instant>,
+    /// Last rendered chat area (for mouse hit testing).
+    pub chat_area: ChatViewport,
+    /// Scroll offset (top line index) used when rendering chat last frame.
+    pub chat_scroll_top: u16,
+    /// Logical line index in chat transcript -> `chat_history` index for `Thought` toggle.
+    pub thought_toggle_hits: Vec<(u16, usize)>,
+    /// Debounced send after Enter (dictation tools).
+    pub submit_debounce: crate::tui::composer::SubmitDebounce,
+    /// Rapid paste burst coalescing.
+    pub paste_coalescer: crate::tui::composer::PasteCoalescer,
 }
 
 impl App {
@@ -157,7 +199,111 @@ impl App {
             tool_call_count: 0,
             shimmer_phase: 0,
             discovered_skills_count: 0,
+            trace_panel: crate::tui::live_panels::LiveSnippetBuffer::default(),
+            diff_panel: crate::tui::live_panels::LiveSnippetBuffer::default(),
+            thinking_live: false,
+            thought_started_at: None,
+            chat_area: ChatViewport::default(),
+            chat_scroll_top: 0,
+            thought_toggle_hits: Vec::new(),
+            submit_debounce: crate::tui::composer::SubmitDebounce::default(),
+            paste_coalescer: crate::tui::composer::PasteCoalescer::default(),
         }
+    }
+
+    /// Reset live panels at the start of a new user turn.
+    pub fn begin_turn(&mut self) {
+        self.trace_panel.clear();
+        self.diff_panel.clear();
+        self.thinking_live = true;
+        self.thought_started_at = Some(Instant::now());
+    }
+
+    /// Archive live trace into a single collapsed chat row and hide the live panel.
+    pub fn collapse_thought(&mut self) {
+        if !self.thinking_live && self.trace_panel.is_empty() {
+            return;
+        }
+        let lines = self.trace_panel.collect_all_lines();
+        if lines.is_empty() {
+            self.thinking_live = false;
+            self.thought_started_at = None;
+            self.trace_panel.clear();
+            return;
+        }
+        let duration_secs = self
+            .thought_started_at
+            .map(|s| s.elapsed().as_secs() as u32)
+            .unwrap_or(0)
+            .max(1);
+        self.chat_history.push(ChatEntry::Thought {
+            duration_secs,
+            lines,
+            expanded: false,
+        });
+        self.trace_panel.clear();
+        self.thinking_live = false;
+        self.thought_started_at = None;
+        self.auto_scroll_if_sticky();
+    }
+
+    pub fn toggle_thought_at(&mut self, entry_index: usize) {
+        if let Some(ChatEntry::Thought { expanded, .. }) = self.chat_history.get_mut(entry_index) {
+            *expanded = !*expanded;
+        }
+    }
+
+    pub fn trace_push(&mut self, line: impl Into<String>) {
+        self.trace_panel.push_line(line);
+    }
+
+
+    /// Dictation / paste: cancel a pending debounced submit because more input arrived.
+    pub fn cancel_pending_submit(&mut self) {
+        self.submit_debounce.cancel();
+    }
+
+    /// Schedule send after Enter; waits for quiet period so per-word Enter merges.
+    pub fn schedule_submit(&mut self) {
+        self.submit_debounce.schedule(std::time::Instant::now());
+    }
+
+    pub fn submit_debounce_ready(&mut self) -> bool {
+        self.submit_debounce.ready(std::time::Instant::now())
+    }
+
+    pub fn has_pending_submit(&self) -> bool {
+        self.submit_debounce.is_pending()
+    }
+
+    /// Push paste text; returns chunks that should be inserted immediately.
+    pub fn coalesce_paste(&mut self, chunk: &str) -> Vec<String> {
+        let now = std::time::Instant::now();
+        let mut out = Vec::new();
+        if let Some(prev) = self.paste_coalescer.push(chunk, now) {
+            out.push(prev);
+        }
+        out
+    }
+
+    /// Flush paste coalescer on tick (end of burst).
+    pub fn flush_paste_coalescer(&mut self) -> Option<String> {
+        self.paste_coalescer
+            .flush_expired(std::time::Instant::now())
+    }
+
+    pub fn tick_composer(&mut self) {
+        if let Some(text) = self.flush_paste_coalescer() {
+            self.input_insert_text(&text);
+        }
+    }
+
+    pub fn trace_push_delta(&mut self, delta: &str) {
+        self.trace_panel.push_delta(delta);
+    }
+
+    pub fn diff_push_text(&mut self, text: &str) {
+        crate::tui::live_panels::ingest_diff_text(&mut self.diff_panel, text);
     }
 
     /// Get the current input as a single string.
@@ -202,6 +348,7 @@ impl App {
 
     /// Insert a newline at the cursor position.
     pub fn input_newline(&mut self) {
+        self.cancel_pending_submit();
         let current_line = &self.input_lines[self.cursor_line];
         let byte_idx = char_to_byte_index(current_line, self.cursor_col);
         let rest = current_line[byte_idx..].to_string();
@@ -368,6 +515,12 @@ impl App {
             .push(ChatEntry::SystemInfo("Chat cleared.".into()));
         self.tool_call_count = 0;
         self.shimmer_phase = 0;
+        self.thinking_live = false;
+        self.thought_started_at = None;
+        self.trace_panel.clear();
+        self.diff_panel.clear();
+        self.submit_debounce.clear();
+        self.paste_coalescer.clear();
     }
 
     /// Advance the shimmer animation phase.

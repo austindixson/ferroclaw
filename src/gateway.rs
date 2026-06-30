@@ -108,10 +108,11 @@ pub async fn start_gateway(
         }
     );
 
+    let per_request_timeout_ms = gateway_request_timeout_ms(config);
     let state = GatewayState {
         config: Arc::new(config.clone()),
         default_model: config.agent.default_model.clone(),
-        per_request_timeout_ms: gateway_request_timeout_ms(),
+        per_request_timeout_ms,
         benchmark_fastpath_enabled: gateway_benchmark_fastpath_enabled(),
     };
 
@@ -376,12 +377,48 @@ fn estimate_tokens(text: &str) -> u64 {
     ((text.chars().count() as u64) / 4).max(1)
 }
 
-fn gateway_request_timeout_ms() -> u64 {
-    std::env::var("FERRO_GATEWAY_REQUEST_TIMEOUT_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|v| *v >= 1000)
-        .unwrap_or(12_000)
+/// Gateway wall-clock ceiling per `/v1/responses` request.
+///
+/// Uses `FERRO_GATEWAY_REQUEST_TIMEOUT_MS` when set; otherwise the largest
+/// `request_timeout_ms` among configured providers (NVIDIA NIM often needs 60s+).
+pub fn gateway_request_timeout_ms(config: &Config) -> u64 {
+    if let Ok(v) = std::env::var("FERRO_GATEWAY_REQUEST_TIMEOUT_MS") {
+        if let Ok(ms) = v.parse::<u64>() {
+            if ms >= 1000 {
+                return ms;
+            }
+        }
+    }
+
+    let mut max_ms = 12_000u64;
+    for ms in [
+        config.providers.nvidia.as_ref().map(|p| p.request_timeout_ms as u64),
+        config
+            .providers
+            .openrouter
+            .as_ref()
+            .map(|p| p.request_timeout_ms as u64),
+        config.providers.openai.as_ref().map(|p| p.request_timeout_ms as u64),
+        config
+            .providers
+            .openai_codex
+            .as_ref()
+            .map(|p| p.request_timeout_ms as u64),
+        config
+            .providers
+            .anthropic
+            .as_ref()
+            .map(|p| p.request_timeout_ms as u64),
+        config.providers.zai.as_ref().map(|p| p.request_timeout_ms as u64),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        max_ms = max_ms.max(ms);
+    }
+
+    // Agent loop overhead (tools, retries) can exceed a single provider HTTP call.
+    max_ms.saturating_add(90_000)
 }
 
 fn gateway_benchmark_fastpath_enabled() -> bool {
@@ -458,6 +495,25 @@ impl GatewayHandle {
     /// Shutdown the gateway server.
     pub async fn shutdown(self) -> Result<()> {
         self.server_task.abort();
+        Ok(())
+    }
+
+    /// Block until Ctrl+C or the HTTP server task exits (daemon-safe).
+    pub async fn run_until_shutdown(self) -> Result<()> {
+        let mut server_task = self.server_task;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("Shutdown signal received");
+                server_task.abort();
+            }
+            res = &mut server_task => {
+                if let Err(e) = res {
+                    if !e.is_cancelled() {
+                        tracing::error!("HTTP gateway server exited: {e}");
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }

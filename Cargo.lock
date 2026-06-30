@@ -714,6 +714,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "git2",
+ "libc",
  "pin-project-lite",
  "rand",
  "ratatui",

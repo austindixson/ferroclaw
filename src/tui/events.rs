@@ -19,6 +19,8 @@ pub enum Event {
     MouseScrollUp,
     /// Mouse wheel scrolled down.
     MouseScrollDown,
+    /// Mouse button pressed (row, column are terminal coordinates).
+    MouseClick(u16, u16),
     /// The terminal was resized.
     Resize(u16, u16),
     /// A tick elapsed (for periodic redraws).
@@ -104,6 +106,9 @@ impl EventHandler {
                             let mapped = match mouse.kind {
                                 MouseEventKind::ScrollUp => Some(Event::MouseScrollUp),
                                 MouseEventKind::ScrollDown => Some(Event::MouseScrollDown),
+                                MouseEventKind::Down(_) => {
+                                    Some(Event::MouseClick(mouse.row, mouse.column))
+                                }
                                 _ => None,
                             };
                             if let Some(ev) = mapped

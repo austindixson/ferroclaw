@@ -14,7 +14,13 @@ use crate::types::ToolDefinition;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::process::Stdio;
-use tokio::process::Command;
+use tokio::process::{Child, Command};
+
+/// Kill and wait so MCP stdio children do not become zombies.
+async fn reap_mcp_child(child: &mut Child) {
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
 
 /// MCP client that manages connections to multiple MCP servers.
 pub struct McpClient {
@@ -292,8 +298,7 @@ impl McpClient {
         })
         .await;
 
-        // Kill the child process
-        let _ = child.kill().await;
+        reap_mcp_child(&mut child).await;
 
         match read_result {
             Ok(Ok(())) if got_tools => Ok(tools),
@@ -406,7 +411,6 @@ impl McpClient {
                                 .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
                                 .collect::<Vec<_>>()
                                 .join("\n");
-                            let _ = child.kill().await;
                             return Ok(text);
                         }
                     }
@@ -415,7 +419,6 @@ impl McpClient {
                             .get("message")
                             .and_then(|m| m.as_str())
                             .unwrap_or("Unknown error");
-                        let _ = child.kill().await;
                         return Err(FerroError::Tool(msg.to_string()));
                     }
                 }
@@ -424,7 +427,7 @@ impl McpClient {
         })
         .await;
 
-        let _ = child.kill().await;
+        reap_mcp_child(&mut child).await;
 
         match result {
             Ok(r) => r,

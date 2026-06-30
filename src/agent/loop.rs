@@ -150,6 +150,10 @@ impl AgentLoop {
     where
         F: FnMut(&AgentEvent),
     {
+        // Yield before heavy sync work so the TUI can redraw (timer/status) while we prepare.
+        tokio::task::yield_now().await;
+        on_event(&AgentEvent::LlmRound { iteration: 1 });
+
         // Per-turn accounting: reset usage before each run so token budget checks and
         // UI status represent the current run, not cumulative prior turns.
         self.context.tokens_used = 0;
@@ -205,7 +209,9 @@ impl AgentLoop {
         }
 
         // Get all tool definitions for provider, plus a built-in-only fallback set
+        tokio::task::yield_now().await;
         let all_tools = self.registry.definitions();
+        tokio::task::yield_now().await;
         let builtin_tools: Vec<ToolDefinition> = self
             .registry
             .all_meta()
@@ -393,6 +399,7 @@ impl AgentLoop {
             }
 
             let tool_calls = response.message.tool_calls.clone();
+            emit_trace_text_chunks(response.message.text(), &mut on_event);
             history.push(response.message);
 
             if let Some(tool_calls) = tool_calls {
@@ -688,6 +695,30 @@ impl AgentLoop {
     }
 }
 
+
+
+/// Push assistant text into the live trace in chunks (providers are non-streaming today).
+fn emit_trace_text_chunks<F>(text: &str, on_event: &mut F)
+where
+    F: FnMut(&AgentEvent),
+{
+    let t = text.trim();
+    if t.is_empty() {
+        return;
+    }
+    let mut chunk = String::new();
+    for ch in t.chars() {
+        chunk.push(ch);
+        if chunk.len() >= 64 {
+            on_event(&AgentEvent::TextDelta(chunk.clone()));
+            chunk.clear();
+        }
+    }
+    if !chunk.is_empty() {
+        on_event(&AgentEvent::TextDelta(chunk));
+    }
+}
+
 fn check_tool_call_caps(
     requested_in_iteration: usize,
     tool_calls_total_so_far: u32,
@@ -835,7 +866,11 @@ fn resolve_provider_max_tokens(config: &Config, model: &str) -> u32 {
     if model_l.starts_with("nvidia:")
         || model_l.starts_with("z-ai/")
         || model_l.starts_with("nvidia/")
+        || model_l.starts_with("google/")
     {
+        if let Some(o) = config.providers.google.as_ref() {
+            return o.max_tokens;
+        }
         return config
             .providers
             .nvidia
@@ -893,12 +928,13 @@ fn resolve_provider_max_tokens(config: &Config, model: &str) -> u32 {
     }
 
     if model.contains('/') {
-        return config
-            .providers
-            .openrouter
-            .as_ref()
-            .map(|o| o.max_tokens)
-            .unwrap_or(8192);
+        if let Some(o) = config.providers.nvidia.as_ref() {
+            return o.max_tokens;
+        }
+        if let Some(o) = config.providers.openrouter.as_ref() {
+            return o.max_tokens;
+        }
+        return 8192;
     }
 
     if model.starts_with("claude-") {

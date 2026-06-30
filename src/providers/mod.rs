@@ -29,6 +29,32 @@ fn is_bare_codex_model(model_l: &str) -> bool {
             || model_l.starts_with("gpt-5."))
 }
 
+/// Route `vendor/model` slugs (e.g. `google/gemma-…`) to NVIDIA NIM or OpenRouter.
+///
+/// When both are configured, NVIDIA wins so a local NIM key is not shadowed by OpenRouter.
+fn resolve_slash_format_provider(config: &Config) -> Result<Box<dyn LlmProvider>> {
+    if let Some(cfg) = &config.providers.nvidia {
+        return openai_compatible_provider(cfg, false);
+    }
+
+    if let Some(or_cfg) = &config.providers.openrouter {
+        let api_key = resolve_env_var(&or_cfg.api_key_env)?;
+        return Ok(Box::new(openrouter::OpenRouterProvider::new(
+            api_key,
+            or_cfg.base_url.clone(),
+            or_cfg.site_url.clone(),
+            or_cfg.site_name.clone(),
+            or_cfg.request_timeout_ms,
+            or_cfg.max_retries,
+            or_cfg.no_retry_max_tokens_threshold,
+        )));
+    }
+
+    Err(FerroError::Config(
+        "Model uses provider/model format but neither OpenRouter nor NVIDIA is configured".into(),
+    ))
+}
+
 fn openai_compatible_provider(
     cfg: &OpenAiConfig,
     prefer_codex_mode: bool,
@@ -74,6 +100,16 @@ pub fn resolve_provider(model: &str, config: &Config) -> Result<Box<dyn LlmProvi
         && let Some(cfg) = &config.providers.google
     {
         return openai_compatible_provider(cfg, false);
+    }
+    // `google/gemma-…` and similar NIM slugs: prefer Google when configured, else NVIDIA NIM
+    // (not OpenRouter — avoids requiring OPENROUTER_API_KEY for slash-format models).
+    if model_l.starts_with("google/") {
+        if let Some(cfg) = &config.providers.google {
+            return openai_compatible_provider(cfg, false);
+        }
+        if let Some(cfg) = &config.providers.nvidia {
+            return openai_compatible_provider(cfg, false);
+        }
     }
     if (model_l.starts_with("xai:") || model_l.starts_with("grok-"))
         && let Some(cfg) = &config.providers.xai
@@ -135,23 +171,9 @@ pub fn resolve_provider(model: &str, config: &Config) -> Result<Box<dyn LlmProvi
         )));
     }
 
-    // OpenRouter models (provider/model format)
+    // provider/model slugs — OpenRouter and NVIDIA NIM share this format
     if openrouter::is_openrouter_model(model) {
-        let or_cfg = config
-            .providers
-            .openrouter
-            .as_ref()
-            .ok_or_else(|| FerroError::Config("OpenRouter provider not configured".into()))?;
-        let api_key = resolve_env_var(&or_cfg.api_key_env)?;
-        return Ok(Box::new(openrouter::OpenRouterProvider::new(
-            api_key,
-            or_cfg.base_url.clone(),
-            or_cfg.site_url.clone(),
-            or_cfg.site_name.clone(),
-            or_cfg.request_timeout_ms,
-            or_cfg.max_retries,
-            or_cfg.no_retry_max_tokens_threshold,
-        )));
+        return resolve_slash_format_provider(config);
     }
 
     // Anthropic models
@@ -185,4 +207,32 @@ pub fn resolve_provider(model: &str, config: &Config) -> Result<Box<dyn LlmProvi
     Err(FerroError::Provider(format!(
         "No provider configured for model '{model}'"
     )))
+}
+
+/// Human-readable backend label for diagnostics (doctor, logs).
+pub fn resolved_backend_label(model: &str, config: &Config) -> String {
+    let model_l = model.to_ascii_lowercase();
+
+    if config.providers.nvidia.is_some()
+        && (model_l.starts_with("nvidia:")
+            || model_l.starts_with("nvidia/")
+            || model_l.starts_with("z-ai/")
+            || model_l.starts_with("google/"))
+    {
+        return "nvidia-nim".into();
+    }
+
+    if openrouter::is_openrouter_model(model) {
+        if config.providers.nvidia.is_some() && config.providers.openrouter.is_none() {
+            return "nvidia-nim".into();
+        }
+        if config.providers.openrouter.is_some() {
+            return "openrouter".into();
+        }
+    }
+
+    match resolve_provider(model, config) {
+        Ok(p) => p.name().into(),
+        Err(e) => format!("error: {e}"),
+    }
 }

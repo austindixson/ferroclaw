@@ -99,12 +99,12 @@ fn test_provider_routing_zai_requires_config() {
 fn test_provider_routing_openrouter_requires_config() {
     let config = Config::default();
     match providers::resolve_provider("openai/gpt-4o", &config) {
-        Ok(_) => panic!("Expected OpenRouter config error"),
+        Ok(_) => panic!("Expected slash-format provider config error"),
         Err(e) => {
             let err = e.to_string();
             assert!(
-                err.contains("OpenRouter"),
-                "Expected OpenRouter error, got: {err}"
+                err.contains("OpenRouter") || err.contains("NVIDIA"),
+                "Expected slash-format provider error, got: {err}"
             );
         }
     }

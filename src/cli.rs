@@ -49,6 +49,12 @@ pub enum Commands {
         command: McpCommands,
     },
 
+    /// Model selection helpers
+    Model {
+        #[command(subcommand)]
+        command: ModelCommands,
+    },
+
     /// Configuration management
     Config {
         #[command(subcommand)]
@@ -59,6 +65,16 @@ pub enum Commands {
     Auth {
         #[command(subcommand)]
         command: AuthCommands,
+    },
+
+    /// Stop Ferroclaw Gateway (`serve`) — same as `gateway stop`
+    Stop,
+
+    /// List or terminate stray Ferroclaw processes (gateway + stuck CLI experiments)
+    Cleanup {
+        /// Terminate listed processes (default: list only)
+        #[arg(long)]
+        kill: bool,
     },
 
     /// Start HTTP gateway and messaging bots
@@ -120,6 +136,12 @@ pub enum McpCommands {
 }
 
 #[derive(Subcommand)]
+pub enum ModelCommands {
+    /// Fetch live catalog and set best Nemotron (or fallback)
+    Auto,
+}
+
+#[derive(Subcommand)]
 pub enum ConfigCommands {
     /// Initialize a new config file
     Init,
@@ -160,6 +182,9 @@ pub enum GatewayCommands {
         /// Number of log lines to print from the gateway log tail
         #[arg(long, default_value_t = 20)]
         lines: usize,
+        /// Skip provider resolution; only health, PID file, and logs
+        #[arg(long)]
+        quick: bool,
     },
 }
 
@@ -358,8 +383,11 @@ mod tests {
         let cli = Cli::parse_from(["ferroclaw", "gateway", "doctor", "--lines", "5"]);
         match cli.command {
             Commands::Gateway {
-                command: GatewayCommands::Doctor { lines },
-            } => assert_eq!(lines, 5),
+                command: GatewayCommands::Doctor { lines, quick },
+            } => {
+                assert_eq!(lines, 5);
+                assert!(!quick);
+            }
             _ => panic!("expected gateway doctor"),
         }
     }

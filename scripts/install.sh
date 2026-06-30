@@ -1,8 +1,7 @@
 # Path: /Users/ghost/Desktop/ferroclaw/scripts/install.sh
 # Module: scripts
 # Purpose: Install module
-# Dependencies: it immediately
-            if [ -f "$HOME/.cargo/env" ]
+# Dependencies: git, rust/cargo, curl or wget
 # Related: 
 # Keywords: install, users, ghost, desktop, ferroclaw, scripts, install.sh
 # Last Updated: 2026-03-25
@@ -119,7 +118,7 @@ print_banner() {
     echo "${MAGENTA}${BOLD}"
     echo "     ___                     _              "
     echo "    / __\\__ _ __ _ __ ___   ___| | __ ___      __"
-    echo "   / _\\ / _ \\ '__| '__/ _ \\ / __| |/ _\` \\ \\ /\\ / /"
+    echo '   / _\ / _ \ '"'"'__| '"'"'__/ _ \ / __| |/ _` \ \ /\ / /'
     echo "  / /  |  __/ |  | | | (_) | (__| | (_| |\\ V  V / "
     echo "  \\/    \\___|_|  |_|  \\___/ \\___|_|\\__,_| \\_/\\_/  "
     echo "${RESET}"
@@ -307,12 +306,20 @@ cp "$BINARY_PATH" "$INSTALL_DIR/$BINARY_NAME"
 chmod 755 "$INSTALL_DIR/$BINARY_NAME"
 success "Binary installed"
 
-# Verify it runs
-if "$INSTALL_DIR/$BINARY_NAME" --version &>/dev/null; then
+# Verify it runs (short timeout — under memory pressure macOS may SIGKILL new ferroclaw processes)
+VERIFY_OK=false
+if command -v perl >/dev/null 2>&1; then
+    if perl -e 'alarm 3; exec @ARGV' "$INSTALL_DIR/$BINARY_NAME" --version &>/dev/null; then
+        VERIFY_OK=true
+    fi
+elif "$INSTALL_DIR/$BINARY_NAME" --version &>/dev/null; then
+    VERIFY_OK=true
+fi
+if $VERIFY_OK; then
     INSTALLED_VERSION=$("$INSTALL_DIR/$BINARY_NAME" --version 2>/dev/null || echo "unknown")
     success "Verified: ${DIM}${INSTALLED_VERSION}${RESET}"
 else
-    warn "Binary installed but could not verify (might need library dependencies)"
+    warn "Binary installed but could not verify (run: pkill -9 -f 'ferroclaw serve'; ferroclaw --version)"
 fi
 
 # ── Step 6: Update PATH ─────────────────────────────────────────────────────

@@ -13,13 +13,13 @@ use super::hermes_ui::draw as draw_hermes;
 use crate::agent::AgentLoop;
 use crate::agent::r#loop::AgentEvent;
 use crate::config::{self, Config};
-use crate::tui::glitter_verbs::{
-    elapsed_ms_since, glitter_verb_for_llm_pending, glitter_verb_for_tool_call,
-};
+use crate::tui::glitter_verbs::{glitter_verb_for_tools, verb_for_llm_round};
+use crate::tui::model_select::{auto_pick_provider, pick_recommended_from_catalog};
 use crate::types::{Message, RunStopReason};
 
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
+use crossterm::style::Print;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -31,6 +31,20 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::task::JoinHandle;
+
+/// Background agent turn: keeps the main TUI loop free to redraw the timer/status.
+struct PendingAgentRun {
+    join: JoinHandle<(AgentLoop, Vec<Message>, crate::error::Result<crate::types::RunOutcome>)>,
+    event_rx: UnboundedReceiver<AgentEvent>,
+}
+
+enum PendingPoll {
+    Idle,
+    StillRunning,
+    Finished,
+}
 
 #[derive(Debug, Clone)]
 struct ExternalSkill {
@@ -41,9 +55,30 @@ struct ExternalSkill {
 
 type SkillCatalog = BTreeMap<String, ExternalSkill>;
 
+/// Max bytes read per external SKILL.md (avoids OOM from huge files).
+const MAX_SKILL_FILE_BYTES: usize = 64 * 1024;
+/// Cap discovered external skills (user machines can have 500+ under plugin caches).
+const MAX_EXTERNAL_SKILLS: usize = 120;
+/// Directory names we never descend into when scanning for SKILL.md.
+const SKIP_SCAN_DIR_NAMES: &[&str] = &[
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".git",
+    "cache",
+    "plugins",
+    ".cache",
+    "vendor",
+];
+
 enum SlashAction {
     Continue,
     Send(String),
+    /// Fetch live catalog and pick best Nemotron (or fallback).
+    AutoPickModel,
+    /// Interactive provider/model browser.
+    ModelBrowse,
 }
 
 const BASE_SLASH_COMMANDS: [&str; 7] = [
@@ -80,7 +115,8 @@ fn current_provider_name(config: &Config) -> String {
     if config.providers.nvidia.is_some()
         && (model.starts_with("z-ai/")
             || model.starts_with("nvidia/")
-            || model.starts_with("nvidia:"))
+            || model.starts_with("nvidia:")
+            || (model.contains('/') && config.providers.openrouter.is_none()))
     {
         return "nvidia".to_string();
     }
@@ -604,21 +640,15 @@ fn discover_external_skills() -> SkillCatalog {
         roots.push(home.join(".hermes/skills"));
         roots.push(home.join(".claude/workspace/skills"));
         roots.push(home.join(".claude/skills"));
-        roots.push(home.join(".claude/plugins/cache"));
         roots.push(home.join(".cursor/skills"));
         roots.push(home.join(".cursor/skills-cursor"));
-        roots.push(home.join(".cursor/plugins/cache"));
-        roots.push(home.join(".openclaw"));
         roots.push(home.join(".openclaw/skills"));
     }
     if let Some(cwd) = &cwd {
         roots.push(cwd.join(".claude/workspace/skills"));
         roots.push(cwd.join(".claude/skills"));
-        roots.push(cwd.join(".claude/plugins/cache"));
         roots.push(cwd.join(".cursor/skills"));
         roots.push(cwd.join(".cursor/skills-cursor"));
-        roots.push(cwd.join(".cursor/plugins/cache"));
-        roots.push(cwd.join(".openclaw"));
         roots.push(cwd.join(".openclaw/skills"));
         roots.push(cwd.join("skills"));
     }
@@ -641,8 +671,23 @@ fn scan_skill_md(root: &Path, out: &mut SkillCatalog) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
+                if path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|name| {
+                        SKIP_SCAN_DIR_NAMES
+                            .iter()
+                            .any(|skip| name.eq_ignore_ascii_case(skip))
+                    })
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
                 stack.push(path);
                 continue;
+            }
+            if out.len() >= MAX_EXTERNAL_SKILLS {
+                return;
             }
             if !path
                 .file_name()
@@ -667,15 +712,27 @@ fn scan_skill_md(root: &Path, out: &mut SkillCatalog) {
     }
 }
 
+fn read_skill_file_bounded(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let file = fs::File::open(path).ok()?;
+    let mut limited = file.take(MAX_SKILL_FILE_BYTES as u64);
+    let mut content = String::new();
+    limited.read_to_string(&mut content).ok()?;
+    if content.is_empty() {
+        return None;
+    }
+    Some(content)
+}
+
 fn load_skill_content(path: &Path) -> Option<(String, PathBuf)> {
-    if let Ok(content) = fs::read_to_string(path) {
+    if let Some(content) = read_skill_file_bounded(path) {
         return Some((content, path.to_path_buf()));
     }
 
     #[cfg(target_os = "macos")]
     {
         if let Some(resolved) = resolve_macos_alias_path(path)
-            && let Ok(content) = fs::read_to_string(&resolved)
+            && let Some(content) = read_skill_file_bounded(&resolved)
         {
             return Some((content, resolved));
         }
@@ -683,7 +740,7 @@ fn load_skill_content(path: &Path) -> Option<(String, PathBuf)> {
 
     if let Ok(resolved) = fs::canonicalize(path)
         && resolved != path
-        && let Ok(content) = fs::read_to_string(&resolved)
+        && let Some(content) = read_skill_file_bounded(&resolved)
     {
         return Some((content, resolved));
     }
@@ -813,12 +870,26 @@ fn refresh_slash_menu(
     if app.slash_menu_selected >= app.slash_menu_items.len() {
         app.slash_menu_selected = app.slash_menu_items.len() - 1;
     }
+    sync_model_picker_input(app, model_state);
     let window = 8usize;
     if app.slash_menu_selected < app.slash_menu_scroll {
         app.slash_menu_scroll = app.slash_menu_selected;
     } else if app.slash_menu_selected >= app.slash_menu_scroll + window {
         app.slash_menu_scroll = app.slash_menu_selected.saturating_sub(window - 1);
     }
+}
+
+
+fn sync_model_picker_input(app: &mut App, model_state: &ModelCommandState) {
+    if model_state.mode == ModelMenuMode::None {
+        return;
+    }
+    app.set_input_text(model_state.query.clone());
+    app.set_status("Model picker — type to filter, Enter to select, Esc to cancel");
+}
+
+async fn try_restart_gateway_async() -> anyhow::Result<String> {
+    tokio::task::spawn_blocking(try_restart_gateway).await?
 }
 
 fn accept_selected_slash_menu_item(app: &mut App) -> bool {
@@ -835,7 +906,7 @@ fn accept_selected_slash_menu_item(app: &mut App) -> bool {
     true
 }
 
-fn handle_model_menu_enter(
+async fn handle_model_menu_enter(
     app: &mut App,
     config: &Config,
     model_state: &mut ModelCommandState,
@@ -857,67 +928,97 @@ fn handle_model_menu_enter(
     match model_state.mode {
         ModelMenuMode::ProviderSelect => {
             match picked.as_str() {
-                "openrouter" => match fetch_openrouter_models(config) {
-                    Ok(models) => {
-                        model_state.openrouter_models = models;
-                        model_state.mode = ModelMenuMode::OpenRouterModels;
-                        model_state.query.clear();
-                        app.set_input_text(String::new());
-                        app.slash_menu_selected = 0;
-                        app.slash_menu_scroll = 0;
-                        app.chat_history.push(ChatEntry::SystemInfo(
-                            "Provider selected: openrouter. Type to search models, use ↑/↓ to navigate, Enter to select."
-                                .into(),
-                        ));
-                    }
-                    Err(e) => {
-                        app.chat_history.push(ChatEntry::Error(format!(
-                            "Failed to load OpenRouter models: {e}"
-                        )));
-                        model_state.mode = ModelMenuMode::None;
-                        app.slash_menu_visible = false;
-                    }
-                },
-                "openai" => match fetch_openai_models(config) {
-                    Ok(models) => {
-                        model_state.openai_models = models;
-                        model_state.mode = ModelMenuMode::OpenAiModels;
-                        model_state.query.clear();
-                        app.set_input_text(String::new());
-                        app.slash_menu_selected = 0;
-                        app.slash_menu_scroll = 0;
-                        app.chat_history.push(ChatEntry::SystemInfo(
-                            "Provider selected: openai. Type to search models, use ↑/↓ to navigate, Enter to select."
-                                .into(),
-                        ));
-                    }
-                    Err(e) => {
-                        app.chat_history.push(ChatEntry::Error(format!(
-                            "Failed to load OpenAI models: {e}"
-                        )));
-                        model_state.mode = ModelMenuMode::None;
-                        app.slash_menu_visible = false;
+                "openrouter" => {
+                    let cfg = config.clone();
+                    match tokio::task::spawn_blocking(move || fetch_openrouter_models(&cfg)).await {
+                        Ok(Ok(models)) => {
+                            model_state.openrouter_models = models;
+                            model_state.mode = ModelMenuMode::OpenRouterModels;
+                            model_state.query.clear();
+                            app.set_input_text(String::new());
+                            app.slash_menu_selected = 0;
+                            app.slash_menu_scroll = 0;
+                            app.chat_history.push(ChatEntry::SystemInfo(
+                                "Provider selected: openrouter. Type to search models, use ↑/↓ to navigate, Enter to select."
+                                    .into(),
+                            ));
+                        }
+                        Ok(Err(e)) => {
+                            app.chat_history.push(ChatEntry::Error(format!(
+                                "Failed to load OpenRouter models: {e}"
+                            )));
+                            model_state.mode = ModelMenuMode::None;
+                            app.slash_menu_visible = false;
+                        }
+                        Err(e) => {
+                            app.chat_history.push(ChatEntry::Error(format!(
+                                "Failed to load OpenRouter models: {e}"
+                            )));
+                            model_state.mode = ModelMenuMode::None;
+                            app.slash_menu_visible = false;
+                        }
                     }
                 },
-                "nvidia" => match fetch_nvidia_models(config) {
-                    Ok(models) => {
-                        model_state.nvidia_models = models;
-                        model_state.mode = ModelMenuMode::NvidiaModels;
-                        model_state.query.clear();
-                        app.set_input_text(String::new());
-                        app.slash_menu_selected = 0;
-                        app.slash_menu_scroll = 0;
-                        app.chat_history.push(ChatEntry::SystemInfo(
-                            "Provider selected: nvidia. Type to search models, use ↑/↓ to navigate, Enter to select."
-                                .into(),
-                        ));
+                "openai" => {
+                    let cfg = config.clone();
+                    match tokio::task::spawn_blocking(move || fetch_openai_models(&cfg)).await {
+                        Ok(Ok(models)) => {
+                            model_state.openai_models = models;
+                            model_state.mode = ModelMenuMode::OpenAiModels;
+                            model_state.query.clear();
+                            app.set_input_text(String::new());
+                            app.slash_menu_selected = 0;
+                            app.slash_menu_scroll = 0;
+                            app.chat_history.push(ChatEntry::SystemInfo(
+                                "Provider selected: openai. Type to search models, use ↑/↓ to navigate, Enter to select."
+                                    .into(),
+                            ));
+                        }
+                        Ok(Err(e)) => {
+                            app.chat_history.push(ChatEntry::Error(format!(
+                                "Failed to load OpenAI models: {e}"
+                            )));
+                            model_state.mode = ModelMenuMode::None;
+                            app.slash_menu_visible = false;
+                        }
+                        Err(e) => {
+                            app.chat_history.push(ChatEntry::Error(format!(
+                                "Failed to load OpenAI models: {e}"
+                            )));
+                            model_state.mode = ModelMenuMode::None;
+                            app.slash_menu_visible = false;
+                        }
                     }
-                    Err(e) => {
-                        app.chat_history.push(ChatEntry::Error(format!(
-                            "Failed to load NVIDIA models: {e}"
-                        )));
-                        model_state.mode = ModelMenuMode::None;
-                        app.slash_menu_visible = false;
+                },
+                "nvidia" => {
+                    let cfg = config.clone();
+                    match tokio::task::spawn_blocking(move || fetch_nvidia_models(&cfg)).await {
+                        Ok(Ok(models)) => {
+                            model_state.nvidia_models = models;
+                            model_state.mode = ModelMenuMode::NvidiaModels;
+                            model_state.query.clear();
+                            app.set_input_text(String::new());
+                            app.slash_menu_selected = 0;
+                            app.slash_menu_scroll = 0;
+                            app.chat_history.push(ChatEntry::SystemInfo(
+                                "Provider selected: nvidia. Type to search models, use ↑/↓ to navigate, Enter to select."
+                                    .into(),
+                            ));
+                        }
+                        Ok(Err(e)) => {
+                            app.chat_history.push(ChatEntry::Error(format!(
+                                "Failed to load NVIDIA models: {e}"
+                            )));
+                            model_state.mode = ModelMenuMode::None;
+                            app.slash_menu_visible = false;
+                        }
+                        Err(e) => {
+                            app.chat_history.push(ChatEntry::Error(format!(
+                                "Failed to load NVIDIA models: {e}"
+                            )));
+                            model_state.mode = ModelMenuMode::None;
+                            app.slash_menu_visible = false;
+                        }
                     }
                 },
                 _ => {
@@ -944,7 +1045,7 @@ fn handle_model_menu_enter(
                         selected,
                         path.display()
                     )));
-                    match try_restart_gateway() {
+                    match try_restart_gateway_async().await {
                         Ok(msg) => app.chat_history.push(ChatEntry::SystemInfo(format!(
                             "Gateway restarted automatically after model change. {msg}"
                         ))),
@@ -990,22 +1091,19 @@ fn handle_slash_command(
     match cmd {
         "/help" | "/?" => {
             app.chat_history.push(ChatEntry::SystemInfo(
-                "Slash commands: /model, /skills, /skills rescan, /use <skill>, /unuse <skill|all>, /active-skills".into(),
+                "Slash commands: /model (auto Nemotron), /model browse, /skills, /skills rescan, /use <skill>, /unuse <skill|all>, /active-skills".into(),
             ));
             SlashAction::Continue
         }
         "/model" => {
             let target = parts.collect::<Vec<_>>().join(" ").trim().to_string();
-            if target.is_empty() {
-                model_state.mode = ModelMenuMode::ProviderSelect;
-                model_state.query.clear();
-                app.set_input_text(String::new());
-                app.chat_history.push(ChatEntry::SystemInfo(
-                    "Model picker: choose provider (↑/↓ + Enter).".into(),
-                ));
-                return SlashAction::Continue;
+            let target_l = target.to_ascii_lowercase();
+            if target_l.is_empty() || target_l == "auto" {
+                return SlashAction::AutoPickModel;
             }
-
+            if matches!(target_l.as_str(), "browse" | "menu" | "list" | "pick") {
+                return SlashAction::ModelBrowse;
+            }
             let selected = if let Ok(n) = target.parse::<usize>() {
                 let catalog = match model_state.mode {
                     ModelMenuMode::OpenRouterModels => &model_state.openrouter_models,
@@ -1153,7 +1251,10 @@ fn handle_slash_command(
                 )));
                 let remainder = parts.collect::<Vec<_>>().join(" ");
                 if remainder.trim().is_empty() {
-                    SlashAction::Continue
+                    SlashAction::Send(format!(
+                        "Follow the guidance in the {} skill for this request.",
+                        skill.name
+                    ))
                 } else {
                     SlashAction::Send(remainder)
                 }
@@ -1186,11 +1287,16 @@ fn handle_slash_command(
 }
 
 /// Run the Hermes-style TUI REPL. Takes ownership of the agent loop and config.
-pub async fn run_hermes_tui(mut agent_loop: AgentLoop, config: &Config) -> anyhow::Result<()> {
+pub async fn run_hermes_tui(
+    agent_loop: AgentLoop,
+    full_agent_load: Option<tokio::task::JoinHandle<anyhow::Result<AgentLoop>>>,
+    config: &Config,
+) -> anyhow::Result<()> {
     // Setup terminal in alternate screen so shell scrollback/output cannot corrupt the TUI frame.
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, Print("\x1b[?2004h"))?; // bracketed paste
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -1200,8 +1306,9 @@ pub async fn run_hermes_tui(mut agent_loop: AgentLoop, config: &Config) -> anyho
     let mut app = App::new(model_name, token_budget);
     let event_handler = EventHandler::new(250);
     let mut history: Vec<Message> = Vec::new();
-    let mut skill_catalog = discover_external_skills();
-    app.discovered_skills_count = skill_catalog.len();
+    app.set_status("Loading MCP tools…");
+    let mut skill_catalog = BTreeMap::new();
+    let skill_scan = tokio::task::spawn_blocking(discover_external_skills);
     let mut active_skills: BTreeMap<String, ExternalSkill> = BTreeMap::new();
 
     // Add Ferroclaw greeting
@@ -1214,7 +1321,12 @@ pub async fn run_hermes_tui(mut agent_loop: AgentLoop, config: &Config) -> anyho
     let mut pending_gateway_restart_confirm = false;
 
     let mut loop_ctx = RunLoopCtx {
-        agent_loop: &mut agent_loop,
+        agent_loop: Some(agent_loop),
+        full_agent_load,
+        skill_scan: Some(skill_scan),
+        mcp_ready_announced: false,
+        deferred_full_agent: None,
+        pending: None,
         config,
         history: &mut history,
         skill_catalog: &mut skill_catalog,
@@ -1229,6 +1341,7 @@ pub async fn run_hermes_tui(mut agent_loop: AgentLoop, config: &Config) -> anyho
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        Print("\x1b[?2004l"),
         DisableMouseCapture,
         LeaveAlternateScreen
     )?;
@@ -1238,7 +1351,12 @@ pub async fn run_hermes_tui(mut agent_loop: AgentLoop, config: &Config) -> anyho
 }
 
 struct RunLoopCtx<'a> {
-    agent_loop: &'a mut AgentLoop,
+    agent_loop: Option<AgentLoop>,
+    full_agent_load: Option<tokio::task::JoinHandle<anyhow::Result<AgentLoop>>>,
+    skill_scan: Option<tokio::task::JoinHandle<SkillCatalog>>,
+    mcp_ready_announced: bool,
+    deferred_full_agent: Option<AgentLoop>,
+    pending: Option<PendingAgentRun>,
     config: &'a Config,
     history: &'a mut Vec<Message>,
     skill_catalog: &'a mut SkillCatalog,
@@ -1247,21 +1365,317 @@ struct RunLoopCtx<'a> {
     pending_gateway_restart_confirm: &'a mut bool,
 }
 
+
+async fn poll_background_loads(app: &mut App, ctx: &mut RunLoopCtx<'_>) {
+    if let Some(handle) = ctx.skill_scan.as_ref() {
+        if handle.is_finished() {
+            if let Some(handle) = ctx.skill_scan.take() {
+                if let Ok(catalog) = handle.await {
+                    *ctx.skill_catalog = catalog;
+                    app.discovered_skills_count = ctx.skill_catalog.len();
+                }
+            }
+        }
+    }
+
+    let Some(handle) = ctx.full_agent_load.as_ref() else {
+        return;
+    };
+    if !handle.is_finished() {
+        return;
+    }
+    let Some(handle) = ctx.full_agent_load.take() else {
+        return;
+    };
+    match handle.await {
+        Ok(Ok(full_agent)) => {
+            if ctx.pending.is_some() {
+                ctx.deferred_full_agent = Some(full_agent);
+            } else {
+                ctx.agent_loop = Some(full_agent);
+            }
+            if !ctx.mcp_ready_announced {
+                ctx.mcp_ready_announced = true;
+                app.chat_history.push(ChatEntry::SystemInfo(
+                    "MCP tools loaded — full tool set is ready.".into(),
+                ));
+                app.set_status("Ready");
+            }
+        }
+        Ok(Err(e)) => {
+            if !ctx.mcp_ready_announced {
+                ctx.mcp_ready_announced = true;
+                app.chat_history.push(ChatEntry::SystemInfo(format!(
+                    "MCP tool load failed (bundled tools still work): {e}"
+                )));
+                app.set_status("Ready (MCP partial)");
+            }
+        }
+        Err(e) => {
+            if !ctx.mcp_ready_announced {
+                ctx.mcp_ready_announced = true;
+                app.chat_history.push(ChatEntry::SystemInfo(format!(
+                    "MCP background task panicked: {e}"
+                )));
+            }
+        }
+    }
+}
+
+
+
+/// Fetch provider catalog and set default to newest Nemotron (or best fallback).
+async fn auto_pick_recommended_model(
+    app: &mut App,
+    config: &Config,
+    model_state: &mut ModelCommandState,
+    pending_gateway_restart_confirm: &mut bool,
+) {
+    app.chat_history.push(ChatEntry::SystemInfo(
+        "Fetching available models and selecting the best Nemotron…".into(),
+    ));
+    app.scroll_to_bottom();
+
+    let cfg = config.clone();
+    let result = tokio::task::spawn_blocking(move || fetch_recommended_model_slug(&cfg)).await;
+
+    match result {
+        Ok(Ok((provider, model))) => {
+            match persist_default_model(config, &model) {
+                Ok(path) => {
+                    app.model_name = model.clone();
+                    model_state.openrouter_models.clear();
+                    model_state.openai_models.clear();
+                    model_state.nvidia_models.clear();
+                    model_state.mode = ModelMenuMode::None;
+                    model_state.query.clear();
+                    app.slash_menu_visible = false;
+                    app.set_input_text(String::new());
+                    app.chat_history.push(ChatEntry::SystemInfo(format!(
+                        "Auto-selected {model} from {provider} catalog (saved to {}).",
+                        path.display()
+                    )));
+                    match try_restart_gateway_async().await {
+                        Ok(msg) => app.chat_history.push(ChatEntry::SystemInfo(format!(
+                            "Gateway restarted automatically after model change. {msg}"
+                        ))),
+                        Err(e) => app.chat_history.push(ChatEntry::Error(format!(
+                            "Model saved, but automatic gateway restart failed: {e}"
+                        ))),
+                    }
+                    *pending_gateway_restart_confirm = false;
+                }
+                Err(e) => {
+                    app.chat_history.push(ChatEntry::Error(format!(
+                        "Failed to persist auto-selected model: {e}"
+                    )));
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            app.chat_history.push(ChatEntry::Error(format!(
+                "Auto model pick failed: {e}. Try /model browse or set providers + API keys."
+            )));
+        }
+        Err(e) => {
+            app.chat_history.push(ChatEntry::Error(format!(
+                "Auto model pick task failed: {e}"
+            )));
+        }
+    }
+    app.scroll_to_bottom();
+}
+
+fn fetch_recommended_model_slug(config: &Config) -> anyhow::Result<(String, String)> {
+    let provider = auto_pick_provider(config)
+        .ok_or_else(|| anyhow::anyhow!("No OpenRouter or NVIDIA provider configured"))?;
+
+    let models = match provider {
+        "nvidia" => fetch_nvidia_models(config)?,
+        "openrouter" => fetch_openrouter_models(config)?,
+        other => anyhow::bail!("Unsupported provider for auto-pick: {other}"),
+    };
+
+    let model = pick_recommended_from_catalog(&models)
+        .ok_or_else(|| anyhow::anyhow!("Provider {provider} returned an empty model list"))?;
+
+    Ok((provider.to_string(), model))
+}
+
+fn open_model_browse_picker(
+    app: &mut App,
+    model_state: &mut ModelCommandState,
+) {
+    model_state.mode = ModelMenuMode::ProviderSelect;
+    model_state.query.clear();
+    app.set_input_text(String::new());
+    sync_model_picker_input(app, model_state);
+    app.chat_history.push(ChatEntry::SystemInfo(
+        "Model browser: choose provider (↑/↓ + Enter). Type to filter. Esc cancels.".into(),
+    ));
+}
+
+/// Send the current composer text to the agent (after debounce or immediate gateway flow).
+async fn submit_user_input(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    ctx: &mut RunLoopCtx<'_>,
+    input: String,
+) -> anyhow::Result<()> {
+    let config = ctx.config;
+    let skill_catalog = &mut *ctx.skill_catalog;
+    let active_skills = &mut *ctx.active_skills;
+    let model_state = &mut *ctx.model_state;
+    let pending_gateway_restart_confirm = &mut *ctx.pending_gateway_restart_confirm;
+
+    if ctx.pending.is_some() || app.is_running {
+        app.chat_history.push(ChatEntry::SystemInfo(
+            "Agent is still running — wait for the current turn to finish.".into(),
+        ));
+        app.scroll_to_bottom();
+        return Ok(());
+    }
+
+    let image_paths = local_image_paths_in_text(&input);
+    if !image_paths.is_empty() {
+        for path in image_paths {
+            let exists = Path::new(&path).is_file();
+            if !exists {
+                app.chat_history.push(ChatEntry::Error(format!(
+                    "Image path not found or not readable: {path}"
+                )));
+            } else {
+                app.chat_history.push(ChatEntry::SystemInfo(format!(
+                    "Detected local image path: {path}. Note: binary image upload from TUI path input is not yet supported; sending path text to the model."
+                )));
+            }
+        }
+    }
+
+    app.chat_history.push(ChatEntry::UserMessage(input.clone()));
+    app.scroll_to_bottom();
+
+    match handle_slash_command(
+        &input,
+        app,
+        config,
+        model_state,
+        pending_gateway_restart_confirm,
+        skill_catalog,
+        active_skills,
+    ) {
+        SlashAction::Continue => {
+            app.set_status("Ready");
+            app.scroll_to_bottom();
+        }
+        SlashAction::AutoPickModel => {
+            auto_pick_recommended_model(
+                app,
+                config,
+                model_state,
+                pending_gateway_restart_confirm,
+            )
+            .await;
+            app.set_status("Ready");
+            app.scroll_to_bottom();
+        }
+        SlashAction::ModelBrowse => {
+            open_model_browse_picker(app, model_state);
+            app.set_status("Ready");
+            app.scroll_to_bottom();
+        }
+        SlashAction::Send(effective_input) => {
+            app.begin_turn();
+            app.set_status("Thinking...");
+            app.iteration = 0;
+            app.is_running = true;
+            app.is_error = false;
+            app.run_started_at = Some(Instant::now());
+            app.verb = verb_for_llm_round(1);
+
+            terminal.draw(|frame| draw_hermes(frame, app))?;
+
+            if ctx.pending.is_some() || ctx.agent_loop.is_none() {
+                app.chat_history.push(ChatEntry::SystemInfo(
+                    "Agent is still running — wait for the current turn to finish.".into(),
+                ));
+                app.scroll_to_bottom();
+                return Ok(());
+            }
+
+            let Some(mut agent_loop) = ctx.agent_loop.take() else {
+                return Ok(());
+            };
+            let mut run_history = std::mem::take(&mut *ctx.history);
+            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+            let input_for_agent = effective_input.clone();
+            let join = tokio::spawn(async move {
+                let result = agent_loop
+                    .run_with_callback(&input_for_agent, &mut run_history, |ev| {
+                        let _ = event_tx.send(ev.clone());
+                    })
+                    .await;
+                (agent_loop, run_history, result)
+            });
+            ctx.pending = Some(PendingAgentRun { join, event_rx });
+        }
+    }
+    Ok(())
+}
+
+/// Fire a debounced submit after dictation-style Enter bursts (e.g. Wispr Flow).
+async fn flush_debounced_submit(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    ctx: &mut RunLoopCtx<'_>,
+) -> anyhow::Result<()> {
+    if !app.submit_debounce_ready() {
+        return Ok(());
+    }
+    let input = app.take_input();
+    if input.is_empty() {
+        return Ok(());
+    }
+    submit_user_input(terminal, app, ctx, input).await
+}
+
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
     event_handler: &EventHandler,
     ctx: &mut RunLoopCtx<'_>,
 ) -> anyhow::Result<()> {
-    let agent_loop = &mut *ctx.agent_loop;
-    let config = ctx.config;
-    let history = &mut *ctx.history;
-    let skill_catalog = &mut *ctx.skill_catalog;
-    let active_skills = &mut *ctx.active_skills;
-    let model_state = &mut *ctx.model_state;
-    let pending_gateway_restart_confirm = &mut *ctx.pending_gateway_restart_confirm;
-
     loop {
+        poll_background_loads(app, ctx).await;
+        flush_debounced_submit(terminal, app, ctx).await?;
+        match poll_pending_agent_run(terminal, app, ctx).await? {
+            PendingPoll::Idle => {}
+            PendingPoll::StillRunning => {
+                match event_handler.recv_timeout(Duration::from_millis(100)) {
+                    Ok(Event::Tick) => {
+                        app.tick_composer();
+                        app.advance_shimmer();
+                    }
+                    Ok(Event::Key(_)) => {
+                        app.chat_history.push(ChatEntry::SystemInfo(
+                            "Agent is still running — wait for the current turn to finish."
+                                .into(),
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(_) => {}
+                }
+                continue;
+            }
+            PendingPoll::Finished => continue,
+        }
+
+        let config = ctx.config;
+        let skill_catalog = &mut *ctx.skill_catalog;
+        let active_skills = &mut *ctx.active_skills;
+        let model_state = &mut *ctx.model_state;
+        let pending_gateway_restart_confirm = &mut *ctx.pending_gateway_restart_confirm;
+
         refresh_slash_menu(app, config, model_state, skill_catalog, active_skills);
 
         // Draw UI
@@ -1270,11 +1684,8 @@ async fn run_loop(
         // Handle events
         match event_handler.next()? {
             Event::Tick => {
+                app.tick_composer();
                 app.advance_shimmer();
-                if app.is_running {
-                    let elapsed = elapsed_ms_since(app.run_started_at);
-                    app.verb = glitter_verb_for_llm_pending(elapsed, app.iteration);
-                }
             }
             Event::MouseScrollUp => {
                 app.scroll_up(3);
@@ -1282,19 +1693,33 @@ async fn run_loop(
             Event::MouseScrollDown => {
                 app.scroll_down(3);
             }
+            Event::MouseClick(row, col) => {
+                if app.chat_area.contains(row, col) {
+                    let rel = row.saturating_sub(app.chat_area.y) as u16;
+                    let logical = app.chat_scroll_top.saturating_add(rel);
+                    for (line, entry_idx) in &app.thought_toggle_hits {
+                        if *line == logical {
+                            app.toggle_thought_at(*entry_idx);
+                            break;
+                        }
+                    }
+                }
+            }
             Event::Paste(raw) => {
                 let mut pasted = normalize_pasted_payload(&raw);
                 if pasted.trim().is_empty() {
                     continue;
                 }
-                // For drag/drop paths and URI pastes, separate from existing text with one space.
                 if !app.input_text().is_empty()
                     && !app.input_text().ends_with(' ')
                     && !pasted.starts_with('\n')
                 {
                     pasted = format!(" {pasted}");
                 }
-                app.input_insert_text(&pasted);
+                app.cancel_pending_submit();
+                for part in app.coalesce_paste(&pasted) {
+                    app.input_insert_text(&part);
+                }
                 continue;
             }
             Event::Key(key_event) => {
@@ -1363,28 +1788,44 @@ async fn run_loop(
                     continue;
                 }
 
-                // Enter: send message (Tab accepts slash suggestion)
+                // Enter: debounced send (dictation tools often emit Enter per word)
                 if code == KeyCode::Enter && !modifiers.contains(KeyModifiers::SHIFT) {
-                    if handle_model_menu_enter(
-                        app,
-                        config,
-                        model_state,
-                        pending_gateway_restart_confirm,
-                    ) {
+                    if model_state.mode != ModelMenuMode::None {
+                        app.cancel_pending_submit();
+                        if !app.input_is_blank() {
+                            model_state.query = app.take_input();
+                            refresh_slash_menu(
+                                app,
+                                config,
+                                model_state,
+                                skill_catalog,
+                                active_skills,
+                            );
+                        }
+                        if handle_model_menu_enter(
+                            app,
+                            config,
+                            model_state,
+                            pending_gateway_restart_confirm,
+                        )
+                        .await
+                        {
+                            continue;
+                        }
                         continue;
                     }
 
-                    let input = app.take_input();
-                    if input.is_empty() {
+                    if app.input_is_blank() {
                         continue;
                     }
 
                     if *pending_gateway_restart_confirm {
+                        let input = app.take_input();
                         let answer = input.trim().to_ascii_lowercase();
                         match answer.as_str() {
                             "y" | "yes" => {
                                 app.chat_history.push(ChatEntry::UserMessage(input.clone()));
-                                match try_restart_gateway() {
+                                match try_restart_gateway_async().await {
                                     Ok(msg) => app.chat_history.push(ChatEntry::SystemInfo(msg)),
                                     Err(e) => app.chat_history.push(ChatEntry::Error(format!(
                                         "Failed to restart gateway: {e}"
@@ -1408,145 +1849,19 @@ async fn run_loop(
                                     "No y/n received; skipping gateway restart and sending your message.".into(),
                                 ));
                                 *pending_gateway_restart_confirm = false;
+                                submit_user_input(terminal, app, ctx, input).await?;
+                                continue;
                             }
                         }
                     }
 
-                    let image_paths = local_image_paths_in_text(&input);
-                    if !image_paths.is_empty() {
-                        for path in image_paths {
-                            let exists = Path::new(&path).is_file();
-                            if !exists {
-                                app.chat_history.push(ChatEntry::Error(format!(
-                                    "Image path not found or not readable: {path}"
-                                )));
-                            } else {
-                                app.chat_history.push(ChatEntry::SystemInfo(format!(
-                                    "Detected local image path: {path}. Note: binary image upload from TUI path input is not yet supported; sending path text to the model."
-                                )));
-                            }
-                        }
+                    if model_state.mode != ModelMenuMode::None {
+                        model_state.mode = ModelMenuMode::None;
+                        model_state.query.clear();
+                        app.slash_menu_visible = false;
                     }
-
-                    app.chat_history.push(ChatEntry::UserMessage(input.clone()));
-                    app.scroll_to_bottom();
-
-                    match handle_slash_command(
-                        &input,
-                        app,
-                        config,
-                        model_state,
-                        pending_gateway_restart_confirm,
-                        skill_catalog,
-                        active_skills,
-                    ) {
-                        SlashAction::Continue => {
-                            app.set_status("Ready");
-                            app.scroll_to_bottom();
-                            continue;
-                        }
-                        SlashAction::Send(effective_input) => {
-                            app.set_status("Thinking...");
-                            app.iteration = 0;
-                            app.is_running = true;
-                            app.is_error = false;
-                            app.run_started_at = Some(Instant::now());
-                            app.verb = glitter_verb_for_llm_pending(0, app.iteration);
-
-                            // Redraw with the user message visible
-                            terminal.draw(|frame| draw_hermes(frame, app))?;
-
-                            // Stream agent events in real time via callback and keep UI ticking.
-                            let (event_tx, mut event_rx) =
-                                tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-                            let run_fut = agent_loop.run_with_callback(
-                                &effective_input,
-                                history,
-                                move |ev| {
-                                    let _ = event_tx.send(ev.clone());
-                                },
-                            );
-                            tokio::pin!(run_fut);
-
-                            let run_result = loop {
-                                tokio::select! {
-                                    res = &mut run_fut => {
-                                        while let Ok(ev) = event_rx.try_recv() {
-                                            apply_agent_event(app, &ev);
-                                        }
-                                        break res;
-                                    }
-                                    _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                                        while let Ok(ev) = event_rx.try_recv() {
-                                            apply_agent_event(app, &ev);
-                                        }
-                                        if app.is_running {
-                                            let elapsed = elapsed_ms_since(app.run_started_at);
-                                            if app.active_tools.is_empty() {
-                                                app.verb = glitter_verb_for_llm_pending(elapsed, app.iteration);
-                                            }
-                                        }
-                                        let _ = terminal.draw(|frame| draw_hermes(frame, app));
-                                    }
-                                }
-                            };
-
-                            app.is_running = false;
-                            app.active_tools.clear();
-                            app.run_started_at = None;
-
-                            match run_result {
-                                Ok(outcome) => {
-                                    if !matches!(outcome.stop.reason, RunStopReason::AssistantFinal)
-                                    {
-                                        let mut msg = format!(
-                                            "Run stop: {:?} · iterations={} · tools={} · elapsed={}ms",
-                                            outcome.stop.reason,
-                                            outcome.stop.iterations,
-                                            outcome.stop.tool_calls_total,
-                                            outcome.stop.elapsed_ms
-                                        );
-                                        if let Some(note) = &outcome.stop.notes {
-                                            msg.push_str(&format!(" · note: {note}"));
-                                        }
-                                        app.chat_history.push(ChatEntry::SystemInfo(msg));
-                                    }
-
-                                    if outcome.text.trim().is_empty() {
-                                        app.chat_history.push(ChatEntry::Error(
-                                            "Assistant produced no visible text. This can happen when a stream is interrupted or response is truncated.".into(),
-                                        ));
-                                    } else {
-                                        app.chat_history
-                                            .push(ChatEntry::AssistantMessage(outcome.text));
-                                    }
-
-                                    app.set_status("Ready");
-                                    app.verb = "Ready".to_string();
-                                }
-                                Err(e) => {
-                                    let err_text = format!("{e}");
-                                    app.chat_history.push(ChatEntry::Error(err_text.clone()));
-                                    let lowered = err_text.to_ascii_lowercase();
-                                    if lowered.contains("generatorexit")
-                                        || lowered.contains("disconnect")
-                                        || lowered.contains("connection closed")
-                                        || lowered.contains("stream")
-                                    {
-                                        app.chat_history.push(ChatEntry::SystemInfo(
-                                            "Stream appears to have been interrupted by client disconnect/cancellation. Check recent request logs for request_id correlation.".into(),
-                                        ));
-                                    }
-                                    app.set_status("Error");
-                                    app.is_error = true;
-                                    app.verb = "Error".to_string();
-                                }
-                            }
-
-                            app.scroll_to_bottom();
-                            continue;
-                        }
-                    }
+                    app.schedule_submit();
+                    continue;
                 }
 
                 if model_state.mode != ModelMenuMode::None {
@@ -1556,14 +1871,17 @@ async fn run_loop(
                                 && !modifiers.contains(KeyModifiers::ALT) =>
                         {
                             model_state.query.push(c);
+                            sync_model_picker_input(app, model_state);
                             continue;
                         }
                         KeyCode::Backspace => {
                             model_state.query.pop();
+                            sync_model_picker_input(app, model_state);
                             continue;
                         }
                         KeyCode::Delete => {
                             model_state.query.clear();
+                            sync_model_picker_input(app, model_state);
                             continue;
                         }
                         KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End => {
@@ -1639,6 +1957,7 @@ async fn run_loop(
 
                 // Character input
                 if let KeyCode::Char(c) = code {
+                    app.cancel_pending_submit();
                     app.input_char(c);
                 }
 
@@ -1663,54 +1982,131 @@ async fn run_loop(
     }
 }
 
+
+/// Poll a background agent turn: drain events, redraw while running, finalize when done.
+async fn poll_pending_agent_run(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    ctx: &mut RunLoopCtx<'_>,
+) -> anyhow::Result<PendingPoll> {
+    let history = &mut *ctx.history;
+    let Some(pending) = ctx.pending.as_mut() else {
+        return Ok(PendingPoll::Idle);
+    };
+
+    while let Ok(ev) = pending.event_rx.try_recv() {
+        apply_agent_event(app, &ev);
+    }
+
+    if !pending.join.is_finished() {
+        terminal.draw(|frame| draw_hermes(frame, app))?;
+        return Ok(PendingPoll::StillRunning);
+    }
+
+    let pending = ctx.pending.take().expect("pending run");
+    let (agent_loop, run_history, run_result) = pending
+        .join
+        .await
+        .map_err(|e| anyhow::anyhow!("agent task panicked: {e}"))?;
+
+    *history = run_history;
+    ctx.agent_loop = ctx.deferred_full_agent.take().or(Some(agent_loop));
+
+    app.is_running = false;
+    app.active_tools.clear();
+    app.run_started_at = None;
+
+    finalize_agent_run(app, run_result);
+    app.scroll_to_bottom();
+    terminal.draw(|frame| draw_hermes(frame, app))?;
+    Ok(PendingPoll::Finished)
+}
+
+fn finalize_agent_run(app: &mut App, run_result: crate::error::Result<crate::types::RunOutcome>) {
+    app.collapse_thought();
+    match run_result {
+        Ok(outcome) => {
+            if !matches!(outcome.stop.reason, RunStopReason::AssistantFinal) {
+                let mut msg = format!(
+                    "Run stop: {:?} · iterations={} · tools={} · elapsed={}ms",
+                    outcome.stop.reason,
+                    outcome.stop.iterations,
+                    outcome.stop.tool_calls_total,
+                    outcome.stop.elapsed_ms
+                );
+                if let Some(note) = &outcome.stop.notes {
+                    msg.push_str(&format!(" · note: {note}"));
+                }
+                app.chat_history.push(ChatEntry::SystemInfo(msg));
+            }
+
+            if outcome.text.trim().is_empty() {
+                app.chat_history.push(ChatEntry::Error(
+                    "Assistant produced no visible text. This can happen when a stream is interrupted or response is truncated.".into(),
+                ));
+            } else {
+                app.chat_history
+                    .push(ChatEntry::AssistantMessage(outcome.text));
+            }
+
+            app.set_status("Ready");
+            app.verb = "Ready".to_string();
+        }
+        Err(e) => {
+            let err_text = format!("{e}");
+            app.chat_history.push(ChatEntry::Error(err_text.clone()));
+            let lowered = err_text.to_ascii_lowercase();
+            if lowered.contains("generatorexit")
+                || lowered.contains("disconnect")
+                || lowered.contains("connection closed")
+                || lowered.contains("stream")
+            {
+                app.chat_history.push(ChatEntry::SystemInfo(
+                    "Stream appears to have been interrupted by client disconnect/cancellation. Check recent request logs for request_id correlation.".into(),
+                ));
+            }
+            app.set_status("Error");
+            app.is_error = true;
+            app.verb = "Error".to_string();
+        }
+    }
+}
+
+fn truncate_trace(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    format!("{}…", s.chars().take(max).collect::<String>())
+}
+
 /// Apply a single AgentEvent into ChatEntry/metrics state.
 fn apply_agent_event(app: &mut App, event: &AgentEvent) {
     match event {
-        AgentEvent::ToolCallStart { name, .. } => {
+        AgentEvent::ToolCallStart { name, arguments, .. } => {
+            let args_preview = truncate_trace(arguments, 160);
             app.chat_history.push(ChatEntry::ToolCall {
                 name: name.clone(),
-                args: String::new(),
+                args: args_preview.clone(),
             });
-            app.chat_history.push(ChatEntry::TranscriptLine(format!(
-                "◦ reason: running {name}"
-            )));
-            app.iteration += 1;
+            app.trace_push(format!("→ {name} {args_preview}"));
             app.tool_call_count = app.tool_call_count.saturating_add(1);
             app.add_active_tool(name.clone());
-            app.verb = glitter_verb_for_tool_call(name, app.tool_call_count, app.shimmer_phase);
+            app.verb = glitter_verb_for_tools(&app.active_tools);
+            app.scroll_to_bottom();
         }
         AgentEvent::LlmRound { iteration } => {
-            app.chat_history.push(ChatEntry::TranscriptLine(format!(
-                "⋯ thinking (round {iteration})"
-            )));
-            app.chat_history
-                .push(ChatEntry::TranscriptLine("◦ reason: evaluating next step".to_string()));
-            let elapsed = elapsed_ms_since(app.run_started_at);
-            app.verb = glitter_verb_for_llm_pending(elapsed, *iteration);
+            app.iteration = *iteration;
+            app.trace_push(format!("◇ round {iteration}: calling model…"));
+            app.verb = verb_for_llm_round(*iteration);
         }
         AgentEvent::ModelToolChoice { names, .. } => {
             if !names.is_empty() {
-                app.chat_history.push(ChatEntry::TranscriptLine(format!(
-                    "◆ model selected tools: {}",
-                    names.join(", ")
-                )));
-                let brief = if names.len() > 3 {
-                    format!("{}, +{}", names[..3].join(", "), names.len() - 3)
-                } else {
-                    names.join(", ")
-                };
-                app.chat_history.push(ChatEntry::TranscriptLine(format!(
-                    "◦ reason: selected tools for required action ({brief})"
-                )));
+                app.trace_push(format!("◆ tools: {}", names.join(", ")));
             }
+            app.verb = glitter_verb_for_tools(names);
         }
         AgentEvent::ParallelToolBatch { count } => {
-            app.chat_history.push(ChatEntry::TranscriptLine(format!(
-                "◆ parallel tool batch: {count}"
-            )));
-            app.chat_history.push(ChatEntry::TranscriptLine(format!(
-                "◦ reason: parallelized {count} tool call(s)"
-            )));
+            app.trace_push(format!("◆ parallel batch: {count} tools"));
         }
         AgentEvent::ToolResult {
             name,
@@ -1718,19 +2114,29 @@ fn apply_agent_event(app: &mut App, event: &AgentEvent) {
             is_error,
             ..
         } => {
+            let summary = if content.chars().count() > 120 {
+                format!("{}…", content.chars().take(120).collect::<String>())
+            } else {
+                content.clone()
+            };
             app.chat_history.push(ChatEntry::ToolResult {
                 name: name.clone(),
-                content: content.clone(),
+                content: summary.clone(),
                 is_error: *is_error,
             });
-            app.chat_history.push(ChatEntry::TranscriptLine(format!(
-                "◦ reason: {} returned {}; deciding next step",
-                name,
-                if *is_error { "error" } else { "result" }
-            )));
+            app.trace_push(format!(
+                "← {name} {} {}",
+                if *is_error { "✕" } else { "✓" },
+                truncate_trace(&summary, 100)
+            ));
+            app.diff_push_text(content);
             app.remove_active_tool(name);
-            let elapsed = elapsed_ms_since(app.run_started_at);
-            app.verb = glitter_verb_for_llm_pending(elapsed, app.iteration);
+            app.verb = if app.active_tools.is_empty() {
+                verb_for_llm_round(app.iteration.max(1))
+            } else {
+                glitter_verb_for_tools(&app.active_tools)
+            };
+            app.scroll_to_bottom();
         }
         AgentEvent::TokenUsage {
             input,
@@ -1742,12 +2148,19 @@ fn apply_agent_event(app: &mut App, event: &AgentEvent) {
             app.last_output_tokens = *output;
         }
         AgentEvent::Error(msg) => {
+            app.collapse_thought();
             app.chat_history.push(ChatEntry::Error(msg.clone()));
+            app.trace_push(format!("✕ {msg}"));
             app.is_error = true;
             app.verb = "Error".to_string();
         }
-        AgentEvent::TextDelta(_) | AgentEvent::Done { .. } => {
-            // Text deltas are already captured in the final response
+        AgentEvent::TextDelta(delta) => {
+            app.trace_push_delta(delta);
+            app.verb = verb_for_llm_round(app.iteration.max(1));
+        }
+        AgentEvent::Done { .. } => {
+            app.trace_panel.flush_streaming();
+            app.collapse_thought();
         }
     }
 }

@@ -128,6 +128,7 @@ async fn run_loop(
                 continue;
             }
 
+            Event::MouseClick(_, _) => {}
             Event::MouseScrollDown => {
                 app.scroll_down(3);
                 continue;
@@ -495,6 +496,14 @@ fn draw_chat_history(frame: &mut Frame, app: &App, area: Rect, _frame_count: u64
                     ),
                     Span::styled(text, Style::default().fg(Color::Red)),
                 ]));
+            }
+        
+            ChatEntry::Thought { duration_secs, expanded, .. } => {
+                let chevron = if *expanded { "▾" } else { "▸" };
+                lines.push(Line::from(Span::styled(
+                    format!("{chevron} Thought · {duration_secs}s"),
+                    Style::default().fg(Color::DarkGray),
+                )));
             }
         }
         lines.push(Line::from(""));

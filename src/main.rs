@@ -3,7 +3,7 @@ use ferroclaw::agent::AgentLoop;
 use ferroclaw::benchmark_mode::BenchmarkTelemetry;
 use ferroclaw::cli::{
     AuditCommands, AuthCommands, Cli, Commands, ConfigCommands, GatewayCommands, McpCommands,
-    PlanCommands, TaskCommands,
+    ModelCommands, PlanCommands, TaskCommands,
 };
 use ferroclaw::config::{self, Config};
 use ferroclaw::mcp::client::McpClient;
@@ -25,8 +25,81 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
+fn main() {
+    if handle_early_cli() {
+        return;
+    }
+    if let Err(e) = tokio_main() {
+        eprintln!("Error: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+/// Fast paths that must not load config, tokio, or MCP (avoids OOM/hang under memory pressure).
+fn handle_early_cli() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("ferroclaw {}", env!("CARGO_PKG_VERSION"));
+        return true;
+    }
+    let cleanup = matches!(args.get(1).map(String::as_str), Some("cleanup"));
+    if cleanup {
+        let kill = args.iter().any(|a| a == "--kill");
+        match ferroclaw::process::cleanup_ferroclaw_processes(kill) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("Error: {e:#}");
+                std::process::exit(1);
+            }
+        }
+        return true;
+    }
+    let stop = matches!(args.get(1).map(String::as_str), Some("stop"))
+        || matches!((args.get(1), args.get(2)), (Some(s), Some(sub)) if s == "gateway" && sub == "stop");
+    if stop {
+        match gateway_stop_sync() {
+            Ok(msg) => println!("{msg}"),
+            Err(e) => {
+                eprintln!("Error: {e:#}");
+                std::process::exit(1);
+            }
+        }
+        return true;
+    }
+    if matches!((args.get(1), args.get(2)), (Some(m), Some(a)) if m == "model" && a == "auto") {
+        ferroclaw::setup::load_env_file();
+        let config_path = args
+            .windows(2)
+            .find(|w| w[0] == "--config")
+            .map(|w| w[1].as_str());
+        match config::load_config(config_path.map(std::path::Path::new)) {
+            Ok(config) => {
+                if let Err(e) = ferroclaw::model_auto::run_auto_pick(&config) {
+                    eprintln!("Error: {e:#}");
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("Error: {e:#}");
+                std::process::exit(1);
+            }
+        }
+        return true;
+    }
+    false
+}
+
+fn gateway_stop_sync() -> anyhow::Result<String> {
+    let stopped = ferroclaw::process::stop_gateway_processes()?;
+    Ok(if stopped {
+        "Ferroclaw Gateway stopped.".to_string()
+    } else {
+        "Ferroclaw Gateway was not running.".to_string()
+    })
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn tokio_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Load .env from config dir (API keys, tokens)
@@ -56,7 +129,9 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Setup => ferroclaw::setup::run_wizard()?,
         Commands::Run { no_tui } => {
-            ensure_gateway_running(&config, config_path_arg.as_deref().map(Path::new)).await?;
+            warn_if_gateway_serve_already_running();
+            // Do not auto-start `serve` here — that loads a second full agent and often triggers macOS OOM kills.
+            // Use `ferroclaw serve` separately, or `ferroclaw gateway start` when you need the HTTP gateway.
             if no_tui {
                 run_repl(config).await?;
             } else if let Err(e) = run_orchestrator_tui(config.clone()).await {
@@ -73,8 +148,13 @@ async fn main() -> anyhow::Result<()> {
             harness_telemetry_json,
         } => run_once(config, &prompt, benchmark_json, harness_telemetry_json).await?,
         Commands::Mcp { command } => handle_mcp(config, command).await?,
+        Commands::Model { command } => handle_model(&config, command)?,
         Commands::Config { command } => handle_config(command)?,
         Commands::Auth { command } => handle_auth(command)?,
+        Commands::Stop => gateway_stop().await?,
+        Commands::Cleanup { kill } => {
+            ferroclaw::process::cleanup_ferroclaw_processes(kill)?
+        }
         Commands::Serve => handle_serve(config).await?,
         Commands::Gateway { command } => {
             handle_gateway(
@@ -93,8 +173,32 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_orchestrator_tui(config: Config) -> anyhow::Result<()> {
-    let (agent_loop, _audit) = build_agent(config.clone(), false).await?;
-    ferroclaw::tui::hermes_tui::run_hermes_tui(agent_loop, &config).await
+    eprintln!(
+        "[ferroclaw] Starting TUI; bundled tools ready now, MCP discovery continues in background…"
+    );
+    let initial = build_run_initial_agent(&config).await?;
+    let config_bg = config.clone();
+    let full_agent_load = tokio::spawn(async move {
+        build_agent(config_bg, false)
+            .await
+            .map(|(agent, _audit)| agent)
+    });
+    ferroclaw::tui::hermes_tui::run_hermes_tui(initial, Some(full_agent_load), &config).await
+}
+
+/// Warn when `ferroclaw serve` is already up — a second full in-process agent often triggers macOS OOM kills.
+fn warn_if_gateway_serve_already_running() {
+    let Ok(pids) = ferroclaw::process::gateway_running_pids() else {
+        return;
+    };
+    if pids.is_empty() {
+        return;
+    }
+    eprintln!(
+        "[ferroclaw] Warning: Ferroclaw Gateway (`serve`) is already running (PIDs {pids:?}). \
+         `ferroclaw run` loads another agent in memory. If commands exit with `zsh: killed`, stop the gateway first: \
+         ferroclaw gateway stop"
+    );
 }
 
 fn gateway_health_url(config: &Config) -> String {
@@ -109,63 +213,17 @@ fn gateway_log_path() -> PathBuf {
     config::data_dir().join("gateway.log")
 }
 
-fn gateway_process_pattern() -> &'static str {
-    "ferroclaw serve"
-}
-
-fn stop_gateway_processes() -> anyhow::Result<bool> {
-    let pattern = gateway_process_pattern();
-    let status = Command::new("pkill")
-        .arg("-f")
-        .arg(pattern)
-        .status()
-        .map_err(|e| {
-            anyhow::anyhow!("Failed to execute pkill for gateway pattern '{pattern}': {e}")
-        })?;
-
-    // pkill exit codes: 0=matched/terminated, 1=no matches, 2=syntax, 3=fatal.
-    if status.code() == Some(0) {
-        return Ok(true);
-    }
-    if status.code() == Some(1) {
-        return Ok(false);
-    }
-
-    Err(anyhow::anyhow!(
-        "pkill returned unexpected status {} while stopping gateway",
-        status
-    ))
-}
-
-fn gateway_pids() -> anyhow::Result<Vec<u32>> {
-    let pattern = gateway_process_pattern();
-    let output = Command::new("pgrep")
-        .arg("-f")
-        .arg(pattern)
-        .output()
-        .map_err(|e| {
-            anyhow::anyhow!("Failed to execute pgrep for gateway pattern '{pattern}': {e}")
-        })?;
-
-    if output.status.code() == Some(1) {
-        return Ok(Vec::new());
-    }
-    if !output.status.success() {
-        return Err(anyhow::anyhow!(
-            "pgrep returned unexpected status {} while inspecting gateway process",
-            output.status
-        ));
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    let pids = text
-        .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .collect::<Vec<_>>();
-    Ok(pids)
-}
-
 fn start_gateway_process(exe: &Path, config_path: Option<&Path>) -> anyhow::Result<()> {
+    ferroclaw::process::clear_stale_gateway_pid_file();
+    if let Some(pid) = ferroclaw::process::read_gateway_pid() {
+        if ferroclaw::process::is_pid_alive(pid) {
+            return Err(anyhow::anyhow!(
+                "Ferroclaw Gateway already running (PID {pid}). Stop with: ferroclaw stop"
+            ));
+        }
+        ferroclaw::process::remove_gateway_pid_file();
+    }
+
     let log_path = gateway_log_path();
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -183,19 +241,23 @@ fn start_gateway_process(exe: &Path, config_path: Option<&Path>) -> anyhow::Resu
         .map_err(|e| anyhow::anyhow!("Failed to open gateway log '{}': {e}", log_path.display()))?;
 
     let mut cmd = Command::new(exe);
-    cmd.arg("serve")
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
+    cmd.arg("serve");
     if let Some(p) = config_path {
         cmd.arg("--config").arg(p);
     }
+    ferroclaw::process::command_new_session(&mut cmd);
 
-    cmd.spawn().map_err(|e| {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+
+    let child = cmd.spawn().map_err(|e| {
         anyhow::anyhow!(
             "Failed to start Ferroclaw Gateway via '{} serve': {e}",
             exe.display()
         )
     })?;
+    ferroclaw::process::write_gateway_pid(child.id())?;
     Ok(())
 }
 
@@ -224,27 +286,6 @@ async fn wait_for_gateway_health(config: &Config, attempts: usize, sleep_ms: u64
     false
 }
 
-async fn ensure_gateway_running(config: &Config, config_path: Option<&Path>) -> anyhow::Result<()> {
-    if is_gateway_healthy(config).await {
-        return Ok(());
-    }
-
-    let exe = std::env::current_exe()?;
-    start_gateway_process(&exe, config_path)?;
-
-    if wait_for_gateway_health(config, 15, 250).await {
-        eprintln!(
-            "[ferroclaw] Auto-started Ferroclaw Gateway on {}:{}",
-            config.gateway.bind, config.gateway.port
-        );
-        return Ok(());
-    }
-
-    Err(anyhow::anyhow!(
-        "Ferroclaw Gateway is not healthy on {} after auto-start attempt",
-        gateway_health_url(config)
-    ))
-}
 
 async fn gateway_start(config: &Config, config_path: Option<&Path>) -> anyhow::Result<()> {
     if is_gateway_healthy(config).await {
@@ -289,11 +330,24 @@ fn gateway_tail_lines(path: &Path, lines: usize) -> anyhow::Result<Vec<String>> 
     Ok(all[start..].to_vec())
 }
 
-async fn gateway_doctor(config: &Config, lines: usize) -> anyhow::Result<()> {
+async fn gateway_doctor(config: &Config, lines: usize, quick: bool) -> anyhow::Result<()> {
     let health_url = gateway_health_url(config);
     let healthy = is_gateway_healthy(config).await;
-    let pids = gateway_pids()?;
+    let pids = ferroclaw::process::gateway_running_pids()?;
     let log_path = gateway_log_path();
+    let model = &config.agent.default_model;
+    let provider_hint = if quick {
+        "skipped (--quick)".to_string()
+    } else {
+        match providers::resolve_provider(model, config) {
+            Ok(p) => format!(
+                "{} / backend={} (ok)",
+                p.name(),
+                providers::resolved_backend_label(model, config)
+            ),
+            Err(e) => format!("ERROR: {e}"),
+        }
+    };
 
     println!("Ferroclaw Gateway doctor");
     println!("- bind: {}", config.gateway.bind);
@@ -301,6 +355,18 @@ async fn gateway_doctor(config: &Config, lines: usize) -> anyhow::Result<()> {
     println!("- health_url: {}", health_url);
     println!("- healthy: {}", if healthy { "yes" } else { "no" });
     println!("- running_pids: {:?}", pids);
+    println!("- default_model: {}", model);
+    println!("- resolved_provider: {}", provider_hint);
+    println!(
+        "- providers_configured: nvidia={}, openrouter={}, openai={}",
+        config.providers.nvidia.is_some(),
+        config.providers.openrouter.is_some(),
+        config.providers.openai.is_some()
+    );
+    println!(
+        "- gateway_request_timeout_ms: {}",
+        ferroclaw::gateway::gateway_request_timeout_ms(config)
+    );
     println!("- log_path: {}", log_path.display());
 
     let tail = gateway_tail_lines(&log_path, lines)?;
@@ -313,6 +379,13 @@ async fn gateway_doctor(config: &Config, lines: usize) -> anyhow::Result<()> {
         }
     }
 
+    if !pids.is_empty() {
+        println!(
+            "- memory_hint: gateway serve is running (PIDs {:?}). Stop it before `ferroclaw run` if you see `zsh: killed` (macOS OOM).",
+            pids
+        );
+    }
+
     Ok(())
 }
 
@@ -322,7 +395,7 @@ async fn gateway_restart(
     force: bool,
 ) -> anyhow::Result<()> {
     if force {
-        let stopped = stop_gateway_processes()?;
+        let stopped = ferroclaw::process::stop_gateway_processes()?;
         println!(
             "Ferroclaw Gateway force-stop: {}",
             if stopped {
@@ -338,7 +411,7 @@ async fn gateway_restart(
 }
 
 async fn gateway_stop() -> anyhow::Result<()> {
-    let stopped = stop_gateway_processes()?;
+    let stopped = ferroclaw::process::stop_gateway_processes()?;
     if stopped {
         println!("Ferroclaw Gateway stopped.");
     } else {
@@ -356,7 +429,7 @@ async fn handle_gateway(
         GatewayCommands::Start => gateway_start(&config, config_path).await,
         GatewayCommands::Stop => gateway_stop().await,
         GatewayCommands::Restart { force } => gateway_restart(&config, config_path, force).await,
-        GatewayCommands::Doctor { lines } => gateway_doctor(&config, lines).await,
+        GatewayCommands::Doctor { lines, quick } => gateway_doctor(&config, lines, quick).await,
     }
 }
 
@@ -597,6 +670,12 @@ async fn handle_mcp(config: Config, command: McpCommands) -> anyhow::Result<()> 
     Ok(())
 }
 
+fn handle_model(config: &Config, command: ModelCommands) -> anyhow::Result<()> {
+    match command {
+        ModelCommands::Auto => ferroclaw::model_auto::run_auto_pick(config),
+    }
+}
+
 fn handle_config(command: ConfigCommands) -> anyhow::Result<()> {
     match command {
         ConfigCommands::Init => {
@@ -643,36 +722,90 @@ fn handle_auth(command: AuthCommands) -> anyhow::Result<()> {
 }
 
 async fn handle_serve(config: Config) -> anyhow::Result<()> {
-    let (agent_loop, _audit) = build_agent(config.clone(), false).await?;
-    let agent_loop = Arc::new(Mutex::new(agent_loop));
+    ferroclaw::process::register_gateway_pid()?;
+    // Bind the HTTP gateway immediately. Full MCP/skills loading can take minutes
+    // and must not block NVIDIA/OpenAI traffic on :8420.
+    let gateway_stub = Arc::new(Mutex::new(build_gateway_stub_agent(&config).await?));
+    let gateway_handle =
+        ferroclaw::gateway::start_gateway(&config, Arc::clone(&gateway_stub)).await?;
+    println!(
+        "Ferroclaw gateway listening on http://{}:{}/v1/health",
+        config.gateway.bind, config.gateway.port
+    );
+
     let histories = Arc::new(Mutex::new(
         std::collections::HashMap::<i64, Vec<Message>>::new(),
     ));
 
-    // Start Telegram bot if configured
+    // Telegram uses the full agent (skills + MCP); load it in the background.
     if let Some(ref tg_config) = config.telegram
         && let Some(bot) = ferroclaw::telegram::TelegramBot::from_config(tg_config)
     {
         let bot = Arc::new(bot);
-        let agent = Arc::clone(&agent_loop);
         let hist = Arc::clone(&histories);
+        let tg_config = config.clone();
         tokio::spawn(async move {
-            if let Err(e) = bot.run(agent, hist).await {
-                tracing::error!("Telegram bot stopped: {e}");
+            match build_agent(tg_config, false).await {
+                Ok((agent_loop, _audit)) => {
+                    let agent = Arc::new(Mutex::new(agent_loop));
+                    println!("Telegram bot ready. Listening for messages...");
+                    if let Err(e) = bot.run(agent, hist).await {
+                        tracing::error!("Telegram bot stopped: {e}");
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Telegram bot failed to start (agent build): {e}");
+                }
             }
         });
-        println!("Telegram bot started. Listening for messages...");
+        println!("Telegram bot starting (loading skills/MCP in background)...");
     }
 
-    // Start gateway
-    ferroclaw::gateway::start_gateway(&config, Arc::clone(&agent_loop)).await?;
-
-    // Keep running (gateway is currently a stub, so just wait)
     println!("Ferroclaw serving. Press Ctrl+C to stop.");
-    tokio::signal::ctrl_c().await?;
-    println!("\nShutting down.");
+    let shutdown_result = gateway_handle.run_until_shutdown().await;
+    ferroclaw::process::remove_gateway_pid_file();
+    shutdown_result?;
+    println!("Shutting down.");
 
     Ok(())
+}
+
+/// Minimal agent for TUI startup: builtins only; bundled skills + MCP load in background.
+async fn build_run_initial_agent(config: &Config) -> anyhow::Result<AgentLoop> {
+    let memory = MemoryStore::new(config.memory.db_path.clone())?;
+    let memory = Arc::new(Mutex::new(memory));
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry, Arc::clone(&memory));
+    let mcp_client = McpClient::new(config.mcp_servers.clone(), config.agent.max_response_size);
+    let provider = providers::resolve_provider(&config.agent.default_model, config)?;
+    let capabilities = capabilities_from_config(&config.security.default_capabilities);
+    Ok(AgentLoop::new(
+        provider,
+        registry,
+        Some(mcp_client),
+        config.clone(),
+        capabilities,
+        Vec::new(),
+    ))
+}
+
+/// Minimal agent for `serve` so the HTTP gateway can bind before MCP discovery finishes.
+async fn build_gateway_stub_agent(config: &Config) -> anyhow::Result<AgentLoop> {
+    let memory = MemoryStore::new(config.memory.db_path.clone())?;
+    let _memory = Arc::new(Mutex::new(memory));
+    let registry = ToolRegistry::new();
+    let provider = providers::resolve_provider(&config.agent.default_model, config)?;
+    let capabilities = capabilities_from_config(&config.security.default_capabilities);
+    let mcp_client = McpClient::new(config.mcp_servers.clone(), config.agent.max_response_size);
+
+    Ok(AgentLoop::new(
+        provider,
+        registry,
+        Some(mcp_client),
+        config.clone(),
+        capabilities,
+        Vec::new(),
+    ))
 }
 
 fn handle_audit(config: Config, command: AuditCommands) -> anyhow::Result<()> {

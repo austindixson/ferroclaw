@@ -498,6 +498,16 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
                     Style::default().fg(RED_LIGHT),
                 );
             }
+            ChatEntry::Thought { duration_secs, expanded, .. } => {
+                let chevron = if *expanded { "▾" } else { "▸" };
+                let row = format!("{chevron} Thought · {duration_secs}s");
+                push_wrapped_styled(
+                    &mut lines,
+                    &row,
+                    inner_width.max(1),
+                    Style::default().fg(GRAY_500),
+                );
+            }
         }
         lines.push(Line::from(""));
     }

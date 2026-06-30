@@ -10,6 +10,8 @@ pub mod hooks;
 pub mod mcp;
 pub mod memory;
 pub mod modes;
+pub mod model_auto;
+pub mod process;
 pub mod provider;
 pub mod providers;
 pub mod security;

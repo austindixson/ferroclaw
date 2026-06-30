@@ -97,6 +97,7 @@ fn run_loop(
             Event::MouseScrollUp => {
                 app.scroll_up(3);
             }
+            Event::MouseClick(_, _) => {}
             Event::MouseScrollDown => {
                 app.scroll_down(3);
             }
@@ -201,6 +202,7 @@ fn run_loop(
                                 terminal.draw(|frame| draw_orchestrator(frame, app))?;
                                 continue;
                             }
+                            Ok(Event::MouseClick(_, _)) => {}
                             Ok(Event::MouseScrollDown) => {
                                 app.scroll_down(3);
                                 terminal.draw(|frame| draw_orchestrator(frame, app))?;
